@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+resume_uploads/
+jobs.db
+*.sqlite3
+.env
+.env.*
+!.env.example
+.next/
+node_modules/
+web/.env.local
+.opencode/omnirush/inbox/

@@ -1,0 +1,17 @@
+{
+  "greenhouse": [
+    "razorpaysoftwareprivatelimited",
+    "inmobi"
+  ],
+  "lever": [
+    "meesho"
+  ],
+  "ashby": [],
+  "workday": [
+    {
+      "company": "BrowserStack",
+      "tenant": "browserstack",
+      "site": "External"
+    }
+  ]
+}
