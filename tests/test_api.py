@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -49,3 +50,25 @@ def test_job_api_returns_404_for_missing_job(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", db)
     response = TestClient(main.app).get("/jobs/fixture/Acme/missing")
     assert response.status_code == 404
+
+
+def test_refresh_starts_only_when_pipeline_run_is_stale(monkeypatch):
+    class Process:
+        def poll(self):
+            return None
+
+    started = []
+    monkeypatch.setattr(main, "_refresh_process", None)
+    monkeypatch.setattr(main, "_last_pipeline_refresh", lambda: (
+        datetime.now(timezone.utc) - timedelta(days=2)
+    ).isoformat())
+    monkeypatch.setattr(
+        main.subprocess, "Popen",
+        lambda *args, **kwargs: started.append((args, kwargs)) or Process(),
+    )
+    monkeypatch.setattr(main, "REFRESH_INTERVAL_SECONDS", 24 * 60 * 60)
+
+    result = main.refresh_if_stale()
+    assert result["status"] == "started"
+    assert started and started[0][0][0][0] == main.sys.executable
+    assert main.refresh_if_stale() == {"status": "running"}

@@ -242,7 +242,10 @@ def upsert(conn, source, company, jobs, now):
              job.get("is_ai", 0), job.get("role_category", "other"),
              job.get("experience_level", "mid"), json.dumps(job.get("skills", [])),
              content_hash(job)))
-        conn.execute("UPDATE jobs SET active=FALSE WHERE source=? AND company=? AND last_seen<?",
+    # Run even when a source returns an empty list: an empty successful feed
+    # means previously seen postings are no longer current, and must not stay
+    # visible forever in the shared database.
+    conn.execute("UPDATE jobs SET active=FALSE WHERE source=? AND company=? AND last_seen<?",
                  (source, company, now))
     conn.commit()
 
@@ -264,12 +267,21 @@ def run(config_path):
                             if isinstance(company, dict) else company)
             now = datetime.now(timezone.utc).isoformat()
             board_config = json.dumps(config_item, sort_keys=True)
-            conn.execute("""INSERT INTO companies
+            company_upsert = """INSERT INTO companies
                 (source, company, board_config, last_fetched_at)
                 VALUES (?,?,?,?)
                 ON CONFLICT(source, company) DO UPDATE SET
-                  board_config=excluded.board_config, last_fetched_at=excluded.last_fetched_at""",
-                         (source, company_name, board_config, now))
+                  board_config=excluded.board_config, last_fetched_at=excluded.last_fetched_at"""
+            if isinstance(conn, PostgresConnection):
+                # The production schema uses native JSONB and TIMESTAMPTZ;
+                # explicit casts keep SQLAlchemy's text parameters portable
+                # across psycopg versions and hosted PostgreSQL providers.
+                company_upsert = """INSERT INTO companies
+                    (source, company, board_config, last_fetched_at)
+                    VALUES (?, ?, CAST(? AS JSONB), CAST(? AS TIMESTAMPTZ))
+                    ON CONFLICT(source, company) DO UPDATE SET
+                      board_config=excluded.board_config, last_fetched_at=excluded.last_fetched_at"""
+            conn.execute(company_upsert, (source, company_name, board_config, now))
             conn.commit()
             run_id = conn.execute(
                 "INSERT INTO pipeline_runs(source, company, started_at) VALUES (?,?,?) RETURNING id",

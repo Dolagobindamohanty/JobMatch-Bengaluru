@@ -208,7 +208,14 @@ def ensure_user(connection, user_id: str):
 
 
 def account_row(row):
-    return dict(row) if row else None
+    return row_to_dict(row) if row else None
+
+
+def row_to_dict(row):
+    """Convert both sqlite3.Row and SQLAlchemy 2 Row objects to a dict."""
+    if hasattr(row, "_mapping"):
+        return dict(row._mapping)
+    return dict(row)
 
 
 def parse_skills(value: Any) -> list[str]:
@@ -224,7 +231,7 @@ def parse_skills(value: Any) -> list[str]:
 
 
 def serialize(row):
-    item = dict(row)
+    item = row_to_dict(row)
     item["skills"] = parse_skills(item.get("skills"))
     item["is_ai"] = bool(item.get("is_ai"))
     item["active"] = bool(item.get("active"))
@@ -323,7 +330,7 @@ def _resume_gap_data(resume_id: str, limit: int):
 
 
 def serialize_resume(row):
-    item = dict(row)
+    item = row_to_dict(row)
     item["parsed_profile"] = json.loads(item.pop("parsed_json"))
     item.pop("file_path", None)
     item.pop("raw_text", None)
@@ -530,7 +537,7 @@ def resume_matches(resume_id: str, limit: int = Query(20, ge=1, le=100)):
         now = datetime.now(timezone.utc).isoformat()
         results = []
         for row in jobs:
-            job = dict(row)
+            job = row_to_dict(row)
             job["skills"] = parse_skills(job.get("skills"))
             breakdown = score_match(profile, resume[0], job)
             connection.execute("""INSERT INTO matches VALUES (?,?,?,?,?,?,?)
@@ -677,7 +684,7 @@ def _table_exists(connection, name: str) -> bool:
 
 
 def _saved_job(row):
-    item = dict(row)
+    item = row_to_dict(row)
     return item
 
 
@@ -737,7 +744,7 @@ def list_saved_searches(request: Request):
     require_resume_features()
     with connect() as connection:
         rows = connection.execute("SELECT id,name,query,filters_json,created_at,updated_at FROM saved_searches WHERE user_id=? ORDER BY created_at DESC", (current_user_id(request),)).fetchall()
-    return {"saved_searches": [{**dict(row), "filters": json.loads(row["filters_json"])} for row in rows]}
+        return {"saved_searches": [{**row_to_dict(row), "filters": json.loads(row["filters_json"])} for row in rows]}
 
 
 @app.delete("/saved-searches/{search_id}")
@@ -767,7 +774,7 @@ def list_applications(request: Request):
     require_resume_features()
     with connect() as connection:
         rows = connection.execute("SELECT id,source,company,job_id,job_title,status,applied_at,notes,created_at,updated_at FROM applications WHERE user_id=? ORDER BY applied_at DESC, created_at DESC", (current_user_id(request),)).fetchall()
-    return {"applications": [dict(row) for row in rows]}
+    return {"applications": [row_to_dict(row) for row in rows]}
 
 
 @app.patch("/applications/{application_id}")
@@ -780,7 +787,7 @@ def update_application(application_id: str, payload: ApplicationInput, request: 
         if not result.rowcount:
             raise HTTPException(status_code=404, detail="Application not found")
         row = connection.execute("SELECT id,source,company,job_id,job_title,status,applied_at,notes,created_at,updated_at FROM applications WHERE id=?", (application_id,)).fetchone()
-    return dict(row)
+    return row_to_dict(row)
 
 
 @app.delete("/applications/{application_id}")
@@ -810,7 +817,7 @@ def list_resume_versions(request: Request):
     require_resume_features()
     with connect() as connection:
         rows = connection.execute("SELECT id,resume_id,label,notes,created_at,updated_at FROM resume_versions WHERE user_id=? ORDER BY created_at DESC", (current_user_id(request),)).fetchall()
-    return {"resume_versions": [dict(row) for row in rows]}
+    return {"resume_versions": [row_to_dict(row) for row in rows]}
 
 
 @app.post("/resumes/{resume_id}/versions", status_code=201)
@@ -828,4 +835,4 @@ def list_linked_resume_versions(resume_id: str, request: Request):
             "SELECT id,resume_id,label,notes,created_at,updated_at FROM resume_versions WHERE user_id=? AND resume_id=? ORDER BY created_at DESC",
             (current_user_id(request), resume_id),
         ).fetchall()
-    return {"resume_versions": [dict(row) for row in rows]}
+    return {"resume_versions": [row_to_dict(row) for row in rows]}

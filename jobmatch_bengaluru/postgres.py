@@ -77,6 +77,11 @@ class PostgresConnection:
     def __exit__(self, exc_type, exc, tb):
         if exc_type:
             self._connection.rollback()
+        else:
+            # ``engine.connect()`` does not auto-commit.  Most API operations
+            # use the adapter as a context manager and rely on the context
+            # boundary for persistence, just as they do with sqlite3.
+            self._connection.commit()
         self._connection.close()
 
     def execute(self, statement, parameters=()):

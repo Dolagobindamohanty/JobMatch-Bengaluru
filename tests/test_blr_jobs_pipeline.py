@@ -115,6 +115,20 @@ def test_upsert_deduplicates_and_marks_disappeared_jobs_inactive():
     assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 2
 
 
+def test_upsert_marks_all_jobs_inactive_when_refresh_feed_is_empty():
+    conn = sqlite3.connect(":memory:")
+    pipeline.init_db(conn)
+    job = {
+        "job_id": "1", "title": "Backend Engineer", "location": "Bengaluru",
+        "url": "https://jobs/1", "posted": "today", "description": "API work",
+        "is_ai": 0,
+    }
+    pipeline.upsert(conn, "fixture", "Acme", [job], "2026-01-01T00:00:00+00:00")
+    pipeline.upsert(conn, "fixture", "Acme", [], "2026-01-02T00:00:00+00:00")
+
+    assert conn.execute("SELECT active FROM jobs WHERE job_id='1'").fetchone()[0] == 0
+
+
 def test_phase1_classification_apis():
     assert pipeline.classify_role_category("Machine Learning Engineer") == "ai_ml"
     assert pipeline.classify_experience("Senior Software Engineer") == "senior"
