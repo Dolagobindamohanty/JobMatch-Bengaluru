@@ -22,15 +22,48 @@ type ApiJob = Omit<Partial<Job>, "is_ai" | "skills"> & {
   skills?: string[] | string;
 };
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+const configuredApiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+const API_BASE_URL = configuredApiBaseUrl || (process.env.NODE_ENV === "development" ? "http://localhost:8000" : "");
+
+function getApiUrl(path: string) {
+  if (!API_BASE_URL) {
+    throw new Error("The API is not configured. Set NEXT_PUBLIC_API_BASE_URL and redeploy the frontend.");
+  }
+
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(API_BASE_URL);
+  } catch {
+    throw new Error("The API URL is invalid. Set NEXT_PUBLIC_API_BASE_URL to the full HTTPS API URL.");
+  }
+
+  if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
+    throw new Error("The API URL must start with http:// or https://.");
+  }
+
+  return new URL(path.replace(/^\//, ""), `${baseUrl.toString().replace(/\/$/, "")}/`).toString();
+}
+
+async function assertOk(response: Response, resource: string) {
+  if (response.ok) return;
+  let detail = "";
+  try {
+    const body = await response.json() as { detail?: unknown; message?: unknown };
+    const message = body.detail ?? body.message;
+    if (typeof message === "string") detail = ` ${message}`;
+  } catch {
+    // Keep the status-based message when the API does not return JSON.
+  }
+  throw new Error(`${resource} service returned ${response.status}.${detail}`);
+}
 
 export async function requestRefresh(): Promise<void> {
-  const response = await fetch(`${API_BASE_URL.replace(/\/$/, "")}/refresh`, {
+  const response = await fetch(getApiUrl("/refresh"), {
     method: "POST",
     headers: { Accept: "application/json" },
     cache: "no-store",
   });
-  if (!response.ok) throw new Error(`Refresh service returned ${response.status}.`);
+  await assertOk(response, "Refresh");
 }
 
 function normalizeJob(item: ApiJob, index: number): Job {
@@ -55,17 +88,24 @@ function normalizeJob(item: ApiJob, index: number): Job {
 }
 
 export async function fetchJobs(signal?: AbortSignal): Promise<Job[]> {
-  const response = await fetch(`${API_BASE_URL.replace(/\/$/, "")}/jobs`, {
-    signal,
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-  if (!response.ok) throw new Error(`Jobs service returned ${response.status}.`);
+  let response: Response;
+  try {
+    response = await fetch(getApiUrl("/jobs"), {
+      signal,
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+  } catch (reason) {
+    if (reason instanceof Error && reason.name === "AbortError") throw reason;
+    throw new Error("The jobs API could not be reached. Check the API URL and CORS settings, then try again.");
+  }
+  await assertOk(response, "Jobs");
   const payload: unknown = await response.json();
   const items = Array.isArray(payload)
     ? payload
     : payload && typeof payload === "object" && Array.isArray((payload as { jobs?: unknown[] }).jobs)
       ? (payload as { jobs: unknown[] }).jobs
-      : [];
+      : null;
+  if (!items) throw new Error("The jobs API returned an unexpected response. Try again or contact the API owner.");
   return items.map((item, index) => normalizeJob(item as ApiJob, index));
 }

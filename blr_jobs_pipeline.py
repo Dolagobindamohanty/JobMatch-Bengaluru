@@ -3,17 +3,19 @@ import argparse
 import hashlib
 import html
 import json
+import os
 import re
 import sqlite3
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 from jobmatch_bengaluru.classifiers import (
     classify_experience, classify_role_category, extract_skills,
 )
 
-DB_PATH = "jobs.db"
+DB_PATH = os.getenv("JOBMATCH_DB_PATH", str(Path(__file__).resolve().parent / "jobs.db"))
 BLR_PATTERN = re.compile(r"bengaluru|bangalore|\bblr\b", re.I)
 AI_TITLE_PATTERN = re.compile(
     r"\b(ai|artificial intelligence|machine learning|ml|deep learning|generative ai|"

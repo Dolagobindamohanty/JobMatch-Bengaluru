@@ -21,14 +21,20 @@ ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = Path(os.getenv("JOBMATCH_DB_PATH", ROOT / "jobs.db"))
 RESUME_DIR = Path(os.getenv("JOBMATCH_RESUME_DIR", ROOT / "resume_uploads"))
 LOCAL_USER_ID = "local-user"
-REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
+REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", 24 * 60 * 60))
+REFRESH_ON_STARTUP = os.getenv("REFRESH_ON_STARTUP", "false").lower() in {"1", "true", "yes"}
 _refresh_lock = threading.Lock()
 _refresh_process = None
+
+
+def _cors_origins():
+    values = [value.strip().rstrip("/") for value in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")]
+    return [value for value in values if value]
 
 app = FastAPI(title="JobMatch Bengaluru API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000").split(","),
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,7 +78,11 @@ def refresh_if_stale():
 
 @app.on_event("startup")
 def refresh_on_open():
-    refresh_if_stale()
+    # Render web services should be available immediately after deploy.  A
+    # refresh can outlive the request and compete with a second instance, so
+    # scheduled refreshes are opt-in (use a Render cron job or POST /refresh).
+    if REFRESH_ON_STARTUP:
+        refresh_if_stale()
 
 
 @app.get("/")
@@ -88,6 +98,7 @@ def root():
 
 
 def connect():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     init_account_tables(connection)
@@ -277,8 +288,18 @@ def serialize_resume(row):
 
 @app.get("/health")
 def health():
-    with connect() as connection:
-        return {"status": "ok", "database": str(DB_PATH), "jobs_table": table_exists(connection)}
+    try:
+        with connect() as connection:
+            jobs_table = table_exists(connection)
+    except (sqlite3.Error, OSError) as error:
+        raise HTTPException(status_code=503, detail="database unavailable") from error
+    return {
+        "status": "ok",
+        "database_backend": "sqlite",
+        "database": str(DB_PATH),
+        "database_url_configured": bool(os.getenv("DATABASE_URL")),
+        "jobs_table": jobs_table,
+    }
 
 
 @app.post("/refresh")
