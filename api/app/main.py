@@ -53,7 +53,7 @@ def _last_pipeline_refresh():
                 "SELECT MAX(finished_at) FROM pipeline_runs WHERE error IS NULL"
             ).fetchone()
         except Exception:
-            row = [(None,)]
+            row = (None,)
     return row[0] if row else None
 
 
