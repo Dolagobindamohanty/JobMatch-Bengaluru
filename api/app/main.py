@@ -17,6 +17,7 @@ from jobmatch_bengaluru.resume_parser import extract_text, parse_profile
 from jobmatch_bengaluru.matching import score_match
 from jobmatch_bengaluru.classifiers import extract_skills
 from jobmatch_bengaluru.postgres import PostgresConnection, initialize_postgres
+from api.app.storage import StorageError, get_resume_storage
 
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = Path(os.getenv("JOBMATCH_DB_PATH", ROOT / "jobs.db"))
@@ -228,6 +229,18 @@ def init_resume_table(connection):
     connection.commit()
 
 
+def _resume_storage():
+    """Resolve storage per operation so tests and deployments can configure it safely."""
+    return get_resume_storage(RESUME_DIR)
+
+
+@app.on_event("startup")
+def validate_resume_storage():
+    # Validate configuration at startup, while keeping boto3 import lazy for
+    # local development and test environments.
+    _resume_storage()
+
+
 def init_match_table(connection):
     connection.execute("""CREATE TABLE IF NOT EXISTS matches (
         resume_id TEXT NOT NULL, source TEXT NOT NULL, company TEXT NOT NULL,
@@ -408,15 +421,26 @@ async def upload_resume(file: UploadFile = File(...)):
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     profile = parse_profile(text)
-    RESUME_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = RESUME_DIR / f"{resume_id}_{Path(filename).name}"
-    file_path.write_bytes(content)
+    storage_key = f"resumes/{resume_id}/{Path(filename).name}"
+    storage = _resume_storage()
+    try:
+        storage.put(storage_key, content, file.content_type)
+    except StorageError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     now = datetime.now(timezone.utc).isoformat()
-    with connect() as connection:
-        init_resume_table(connection)
-        connection.execute("INSERT INTO resumes VALUES (?,?,?,?,?,?,?,?)",
-                           (resume_id, LOCAL_USER_ID, filename, str(file_path), text,
-                            json.dumps(profile), now, now))
+    try:
+        with connect() as connection:
+            init_resume_table(connection)
+            connection.execute("INSERT INTO resumes VALUES (?,?,?,?,?,?,?,?)",
+                               (resume_id, LOCAL_USER_ID, filename, storage_key, text,
+                                json.dumps(profile), now, now))
+    except Exception:
+        # Do not leave an unreferenced private object if metadata persistence fails.
+        try:
+            storage.delete(storage_key)
+        except StorageError:
+            pass
+        raise
     return {"id": resume_id, "filename": filename, "parsed_profile": profile, "created_at": now}
 
 
@@ -455,10 +479,12 @@ def delete_resume(resume_id: str):
                                  (resume_id, LOCAL_USER_ID)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Resume not found")
+    try:
+        _resume_storage().delete(row[0])
+    except StorageError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    with connect() as connection:
         connection.execute("DELETE FROM resumes WHERE id=?", (resume_id,))
-    path = Path(row[0])
-    if path.exists():
-        path.unlink()
     return {"deleted": True, "id": resume_id}
 
 
@@ -582,15 +608,20 @@ def delete_account_data(request: Request):
             files = [row[0] for row in connection.execute(
                 "SELECT file_path FROM resumes WHERE user_id=?", (user_id,)
             ).fetchall()]
+    try:
+        storage = _resume_storage()
+        for file_path in files:
+            storage.delete(file_path)
+    except StorageError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+    with connect() as connection:
+        if _table_exists(connection, "resumes"):
             connection.execute("DELETE FROM matches WHERE resume_id IN (SELECT id FROM resumes WHERE user_id=?)", (user_id,)) if _table_exists(connection, "matches") else None
             connection.execute("DELETE FROM resumes WHERE user_id=?", (user_id,))
         for table in ("saved_jobs", "saved_searches", "applications", "resume_versions"):
             connection.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
         connection.execute("DELETE FROM users WHERE id=?", (user_id,))
-    for file_path in files:
-        path = Path(file_path)
-        if path.exists() and path.is_file():
-            path.unlink()
     return {"deleted": True}
 
 

@@ -35,6 +35,44 @@ def test_resume_rejects_oversized_file(tmp_path, monkeypatch):
     assert response.status_code == 400
 
 
+def test_resume_uses_private_storage_adapter_and_deletes_blob(tmp_path, monkeypatch):
+    class FakeStorage:
+        def __init__(self):
+            self.blobs = {}
+            self.put_calls = []
+            self.delete_calls = []
+
+        def put(self, key, content, content_type=None):
+            self.put_calls.append((key, content_type))
+            self.blobs[key] = content
+
+        def delete(self, key):
+            self.delete_calls.append(key)
+            self.blobs.pop(key, None)
+
+    storage = FakeStorage()
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "jobs.db")
+    monkeypatch.setattr(main, "_resume_storage", lambda: storage)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/resumes", files={"file": ("private.txt", b"Python developer")}
+    )
+    assert response.status_code == 201
+    resume_id = response.json()["id"]
+    assert response.json().keys() == {"id", "filename", "parsed_profile", "created_at"}
+    assert len(storage.blobs) == 1
+    key = next(iter(storage.blobs))
+    assert key.startswith(f"resumes/{resume_id}/")
+    assert client.get(f"/resumes/{resume_id}").json().keys() == {
+        "id", "user_id", "filename", "created_at", "updated_at", "parsed_profile"
+    }
+
+    assert client.delete(f"/resumes/{resume_id}").status_code == 200
+    assert storage.delete_calls == [key]
+    assert storage.blobs == {}
+
+
 def test_resume_matches_and_role_summary(tmp_path, monkeypatch):
     import sqlite3
     import blr_jobs_pipeline as pipeline
