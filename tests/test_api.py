@@ -6,6 +6,14 @@ from api.app import main
 import blr_jobs_pipeline as pipeline
 
 
+def test_api_database_url_selects_postgres_adapter_without_live_server(monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(main, "DATABASE_URL", "postgresql://example/db")
+    monkeypatch.setattr(main, "initialize_postgres", lambda url: sentinel)
+    monkeypatch.setattr(main, "PostgresConnection", lambda engine: (engine,))
+    assert main.connect() == (sentinel,)
+
+
 def test_job_api_lists_and_filters(tmp_path, monkeypatch):
     db = tmp_path / "jobs.db"
     connection = sqlite3.connect(db)

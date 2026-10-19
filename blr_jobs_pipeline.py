@@ -14,8 +14,10 @@ import requests
 from jobmatch_bengaluru.classifiers import (
     classify_experience, classify_role_category, extract_skills,
 )
+from jobmatch_bengaluru.postgres import PostgresConnection, initialize_postgres
 
 DB_PATH = os.getenv("JOBMATCH_DB_PATH", str(Path(__file__).resolve().parent / "jobs.db"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 BLR_PATTERN = re.compile(r"bengaluru|bangalore|\bblr\b", re.I)
 AI_TITLE_PATTERN = re.compile(
     r"\b(ai|artificial intelligence|machine learning|ml|deep learning|generative ai|"
@@ -188,6 +190,8 @@ FETCHERS = {"greenhouse": fetch_greenhouse, "lever": fetch_lever,
 
 
 def init_db(conn):
+    if isinstance(conn, PostgresConnection):
+        return
     conn.execute("""CREATE TABLE IF NOT EXISTS jobs (
         source TEXT, company TEXT, job_id TEXT, title TEXT, location TEXT,
         url TEXT, posted TEXT, description TEXT, first_seen TEXT,
@@ -212,13 +216,20 @@ def init_db(conn):
     conn.commit()
 
 
+def connect_db():
+    """Open the configured production database, or the local SQLite store."""
+    if DATABASE_URL:
+        return PostgresConnection(initialize_postgres(DATABASE_URL))
+    return sqlite3.connect(DB_PATH)
+
+
 def upsert(conn, source, company, jobs, now):
     for job in jobs:
         conn.execute("""INSERT INTO jobs
             (source, company, job_id, title, location, url, posted, description,
              first_seen, last_seen, active, is_ai, role_category,
              experience_level, skills, content_hash)
-            VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)
+             VALUES (?,?,?,?,?,?,?,?,?,?,TRUE,?,?,?,?,?)
             ON CONFLICT(source, company, job_id) DO UPDATE SET
               title=excluded.title, location=excluded.location, url=excluded.url,
               posted=excluded.posted, description=excluded.description,
@@ -231,7 +242,7 @@ def upsert(conn, source, company, jobs, now):
              job.get("is_ai", 0), job.get("role_category", "other"),
              job.get("experience_level", "mid"), json.dumps(job.get("skills", [])),
              content_hash(job)))
-    conn.execute("UPDATE jobs SET active=0 WHERE source=? AND company=? AND last_seen<?",
+        conn.execute("UPDATE jobs SET active=FALSE WHERE source=? AND company=? AND last_seen<?",
                  (source, company, now))
     conn.commit()
 
@@ -239,7 +250,7 @@ def upsert(conn, source, company, jobs, now):
 def run(config_path):
     with open(config_path, encoding="utf-8") as file:
         config = json.load(file)
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     init_db(conn)
     total = 0
     for source, companies in config.items():
@@ -283,7 +294,7 @@ def run(config_path):
 
 
 def stats():
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     rows = conn.execute("""SELECT source, company, COUNT(*) FROM jobs
         WHERE active=1 GROUP BY source, company ORDER BY 3 DESC""").fetchall()
     for source, company, count in rows:

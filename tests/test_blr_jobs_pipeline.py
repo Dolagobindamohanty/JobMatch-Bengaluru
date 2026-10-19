@@ -13,6 +13,15 @@ import pytest
 pipeline = importlib.import_module("blr_jobs_pipeline")
 
 
+def test_database_url_selects_postgres_without_connecting(monkeypatch):
+    monkeypatch.setattr(pipeline, "DATABASE_URL", "postgresql://example/db")
+    sentinel = object()
+    monkeypatch.setattr(pipeline, "initialize_postgres", lambda url: sentinel)
+    monkeypatch.setattr(pipeline, "PostgresConnection", lambda engine: (engine,))
+    # The production branch is selected before any network/database operation.
+    assert pipeline.connect_db() == (sentinel,)
+
+
 def test_location_and_role_classifiers_cover_phase1_boundaries():
     assert pipeline.is_blr("Bengaluru")
     assert pipeline.is_blr("BANGALORE, India")

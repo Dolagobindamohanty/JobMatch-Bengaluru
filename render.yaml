@@ -20,10 +20,8 @@ services:
       - key: JOBMATCH_RESUME_DIR
         value: /tmp/jobmatch-resumes
 
-  # Keep collection work out of the web process.  Set JOBMATCH_DB_PATH to a
-  # shared persistent location only while the collector is SQLite-backed; the
-  # PostgreSQL migration should replace this command before production data is
-  # moved off SQLite.
+  # The web service and cron intentionally receive the same PostgreSQL
+  # connection string, so refreshes are immediately visible to the API.
   - type: cron
     name: jobmatch-bengaluru-refresh
     runtime: python
@@ -31,6 +29,13 @@ services:
     schedule: "0 */6 * * *"
     buildCommand: pip install -r api/requirements.txt
     startCommand: python blr_jobs_pipeline.py --config companies.json
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: jobmatch-bengaluru-db
+          property: connectionString
 
 databases:
   - name: jobmatch-bengaluru-db

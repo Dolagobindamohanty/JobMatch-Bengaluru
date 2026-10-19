@@ -5,6 +5,8 @@ schema in sql/postgres_schema.sql; imports are lazy so tests do not require a
 running PostgreSQL server.
 """
 from pathlib import Path
+import re
+from functools import lru_cache
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -44,6 +46,7 @@ def load_schema_sql():
     )
 
 
+@lru_cache(maxsize=4)
 def initialize_postgres(database_url):
     """Create the Phase 1 PostgreSQL schema and return the engine."""
     from sqlalchemy import text
@@ -55,3 +58,52 @@ def initialize_postgres(database_url):
         for statement in statements:
             connection.execute(text(statement))
     return engine
+
+
+class PostgresConnection:
+    """Small DB-API-shaped adapter for the existing SQLite query surface.
+
+    The API and collector intentionally use positional ``?`` parameters and
+    rows that support both integer and column-name access.  Keeping that
+    surface here lets local SQLite tests and production PostgreSQL share the
+    same application code.
+    """
+    def __init__(self, engine):
+        self._connection = engine.connect()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type:
+            self._connection.rollback()
+        self._connection.close()
+
+    def execute(self, statement, parameters=()):
+        from sqlalchemy import text
+
+        # PostgreSQL booleans do not accept SQLite's 0/1 comparisons.
+        statement = re.sub(r"\b(active|is_ai)\s*=\s*1\b", r"\1 = TRUE", statement)
+        statement = re.sub(r"\b(active|is_ai)\s*=\s*0\b", r"\1 = FALSE", statement)
+        if isinstance(parameters, dict):
+            values = parameters
+        else:
+            values = {}
+            index = 0
+            def replace(_match):
+                nonlocal index
+                name = f"p{index}"
+                values[name] = parameters[index]
+                index += 1
+                return f":{name}"
+            statement = re.sub(r"\?", replace, statement)
+        return self._connection.execute(text(statement), values)
+
+    def commit(self):
+        self._connection.commit()
+
+    def rollback(self):
+        self._connection.rollback()
+
+    def close(self):
+        self._connection.close()

@@ -1,4 +1,4 @@
-"""Read-only Phase 2 job discovery API over the Phase 1 SQLite store."""
+"""Job discovery and account API with SQLite local and PostgreSQL production stores."""
 import json
 import os
 import sqlite3
@@ -16,9 +16,11 @@ from pydantic import BaseModel, Field
 from jobmatch_bengaluru.resume_parser import extract_text, parse_profile
 from jobmatch_bengaluru.matching import score_match
 from jobmatch_bengaluru.classifiers import extract_skills
+from jobmatch_bengaluru.postgres import PostgresConnection, initialize_postgres
 
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = Path(os.getenv("JOBMATCH_DB_PATH", ROOT / "jobs.db"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 RESUME_DIR = Path(os.getenv("JOBMATCH_RESUME_DIR", ROOT / "resume_uploads"))
 LOCAL_USER_ID = "local-user"
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", 24 * 60 * 60))
@@ -42,12 +44,12 @@ app.add_middleware(
 
 
 def _last_pipeline_refresh():
-    with sqlite3.connect(DB_PATH) as connection:
+    with connect() as connection:
         try:
             row = connection.execute(
                 "SELECT MAX(finished_at) FROM pipeline_runs WHERE error IS NULL"
             ).fetchone()
-        except sqlite3.OperationalError:
+        except Exception:
             row = [(None,)]
     return row[0] if row else None
 
@@ -98,6 +100,8 @@ def root():
 
 
 def connect():
+    if DATABASE_URL:
+        return PostgresConnection(initialize_postgres(DATABASE_URL))
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
@@ -206,6 +210,11 @@ def serialize(row):
 
 
 def table_exists(connection):
+    if isinstance(connection, PostgresConnection):
+        return connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=?",
+            ("jobs",),
+        ).fetchone() is not None
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
     ).fetchone() is not None
@@ -291,12 +300,12 @@ def health():
     try:
         with connect() as connection:
             jobs_table = table_exists(connection)
-    except (sqlite3.Error, OSError) as error:
+    except Exception as error:
         raise HTTPException(status_code=503, detail="database unavailable") from error
     return {
         "status": "ok",
-        "database_backend": "sqlite",
-        "database": str(DB_PATH),
+        "database_backend": "postgresql" if DATABASE_URL else "sqlite",
+        "database": "configured" if DATABASE_URL else str(DB_PATH),
         "database_url_configured": bool(os.getenv("DATABASE_URL")),
         "jobs_table": jobs_table,
     }
@@ -592,6 +601,11 @@ def delete_account(request: Request):
 
 
 def _table_exists(connection, name: str) -> bool:
+    if isinstance(connection, PostgresConnection):
+        return connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=?",
+            (name,),
+        ).fetchone() is not None
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
     ).fetchone() is not None
