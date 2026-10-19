@@ -26,6 +26,8 @@ RESUME_DIR = Path(os.getenv("JOBMATCH_RESUME_DIR", ROOT / "resume_uploads"))
 LOCAL_USER_ID = "local-user"
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", 24 * 60 * 60))
 REFRESH_ON_STARTUP = os.getenv("REFRESH_ON_STARTUP", "false").lower() in {"1", "true", "yes"}
+RESUME_FEATURE_FLAG = "JOBMATCH_RESUME_ENABLED"
+FEATURE_DISABLED_DETAIL = "Resume and account functionality is temporarily disabled"
 _refresh_lock = threading.Lock()
 _refresh_process = None
 
@@ -153,6 +155,25 @@ def current_user_id(request: Request) -> str:
     return value
 
 
+def resume_features_enabled() -> bool:
+    """Return the resume/account feature state with a production-safe default.
+
+    The environment is read per request so deployments and tests can change the
+    flag without importing a second FastAPI application. An explicit flag wins;
+    otherwise production disables these features and every other environment
+    keeps the local-development behavior enabled.
+    """
+    override = os.getenv(RESUME_FEATURE_FLAG)
+    if override is not None:
+        return override.strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("APP_ENV", "local").strip().lower() != "production"
+
+
+def require_resume_features() -> None:
+    if not resume_features_enabled():
+        raise HTTPException(status_code=503, detail=FEATURE_DISABLED_DETAIL)
+
+
 def init_account_tables(connection):
     """Idempotent SQLite migrations for Phase 6 account-owned data."""
     connection.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -238,7 +259,8 @@ def _resume_storage():
 def validate_resume_storage():
     # Validate configuration at startup, while keeping boto3 import lazy for
     # local development and test environments.
-    _resume_storage()
+    if resume_features_enabled():
+        _resume_storage()
 
 
 def init_match_table(connection):
@@ -411,6 +433,7 @@ def trending_skills(ai_only: bool = False, limit: int = Query(20, ge=1, le=100))
 
 @app.post("/resumes", status_code=201)
 async def upload_resume(file: UploadFile = File(...)):
+    require_resume_features()
     filename = file.filename or "resume"
     content = await file.read()
     resume_id = str(uuid.uuid4())
@@ -446,6 +469,7 @@ async def upload_resume(file: UploadFile = File(...)):
 
 @app.get("/resumes/{resume_id}")
 def get_resume(resume_id: str):
+    require_resume_features()
     with connect() as connection:
         init_resume_table(connection)
         row = connection.execute("SELECT id,user_id,filename,file_path,raw_text,parsed_json,created_at,updated_at FROM resumes WHERE id=? AND user_id=?",
@@ -457,6 +481,7 @@ def get_resume(resume_id: str):
 
 @app.patch("/resumes/{resume_id}/skills")
 def update_resume_skills(resume_id: str, skills: list[str]):
+    require_resume_features()
     with connect() as connection:
         init_resume_table(connection)
         row = connection.execute("SELECT parsed_json FROM resumes WHERE id=? AND user_id=?",
@@ -473,6 +498,7 @@ def update_resume_skills(resume_id: str, skills: list[str]):
 
 @app.delete("/resumes/{resume_id}")
 def delete_resume(resume_id: str):
+    require_resume_features()
     with connect() as connection:
         init_resume_table(connection)
         row = connection.execute("SELECT file_path FROM resumes WHERE id=? AND user_id=?",
@@ -490,6 +516,7 @@ def delete_resume(resume_id: str):
 
 @app.get("/resumes/{resume_id}/matches")
 def resume_matches(resume_id: str, limit: int = Query(20, ge=1, le=100)):
+    require_resume_features()
     with connect() as connection:
         init_resume_table(connection)
         init_match_table(connection)
@@ -522,6 +549,7 @@ def resume_gaps(
     limit: int = Query(5, ge=1, le=100, description="Number of cached top matches to aggregate"),
 ):
     """Return counted missing skills from the cached top match explanations."""
+    require_resume_features()
     return _resume_gap_data(resume_id, limit)
 
 
@@ -531,6 +559,7 @@ def resume_suggestions(
     limit: int = Query(5, ge=1, le=100, description="Number of cached top matches to aggregate"),
 ):
     """Return local, text-grounded suggestions without claiming new experience."""
+    require_resume_features()
     data = _resume_gap_data(resume_id, limit)
     suggestions = []
     for gap in data["gaps"]:
@@ -556,6 +585,7 @@ def resume_suggestions(
 
 @app.get("/resumes/{resume_id}/roles")
 def resume_roles(resume_id: str):
+    require_resume_features()
     data = resume_matches(resume_id, limit=100)
     groups = {}
     for item in data["matches"]:
@@ -572,6 +602,7 @@ def resume_roles(resume_id: str):
 # changing the persistence model or exposing provider tokens to this API.
 @app.get("/account")
 def get_account(request: Request):
+    require_resume_features()
     user_id = current_user_id(request)
     with connect() as connection:
         ensure_user(connection, user_id)
@@ -583,6 +614,7 @@ def get_account(request: Request):
 
 @app.patch("/account")
 def update_account(payload: AccountUpdate, request: Request):
+    require_resume_features()
     user_id = current_user_id(request)
     now = datetime.now(timezone.utc).isoformat()
     with connect() as connection:
@@ -600,6 +632,7 @@ def update_account(payload: AccountUpdate, request: Request):
 @app.delete("/account/data")
 def delete_account_data(request: Request):
     """Delete all account-owned records and uploaded resume files."""
+    require_resume_features()
     user_id = current_user_id(request)
     files = []
     with connect() as connection:
@@ -628,6 +661,7 @@ def delete_account_data(request: Request):
 @app.delete("/account")
 def delete_account(request: Request):
     """Convenience alias for a complete local account/data deletion."""
+    require_resume_features()
     return delete_account_data(request)
 
 
@@ -649,6 +683,7 @@ def _saved_job(row):
 
 @app.post("/saved-jobs", status_code=201)
 def save_job(payload: SavedJobInput, request: Request):
+    require_resume_features()
     user_id = current_user_id(request)
     now = datetime.now(timezone.utc).isoformat()
     item_id = str(uuid.uuid4())
@@ -667,6 +702,7 @@ def save_job(payload: SavedJobInput, request: Request):
 
 @app.get("/saved-jobs")
 def list_saved_jobs(request: Request):
+    require_resume_features()
     user_id = current_user_id(request)
     with connect() as connection:
         rows = connection.execute(
@@ -677,6 +713,7 @@ def list_saved_jobs(request: Request):
 
 @app.delete("/saved-jobs/{saved_job_id}")
 def delete_saved_job(saved_job_id: str, request: Request):
+    require_resume_features()
     with connect() as connection:
         result = connection.execute("DELETE FROM saved_jobs WHERE id=? AND user_id=?", (saved_job_id, current_user_id(request)))
         if not result.rowcount:
@@ -686,6 +723,7 @@ def delete_saved_job(saved_job_id: str, request: Request):
 
 @app.post("/saved-searches", status_code=201)
 def create_saved_search(payload: SavedSearchInput, request: Request):
+    require_resume_features()
     user_id, now, item_id = current_user_id(request), datetime.now(timezone.utc).isoformat(), str(uuid.uuid4())
     with connect() as connection:
         ensure_user(connection, user_id)
@@ -696,6 +734,7 @@ def create_saved_search(payload: SavedSearchInput, request: Request):
 
 @app.get("/saved-searches")
 def list_saved_searches(request: Request):
+    require_resume_features()
     with connect() as connection:
         rows = connection.execute("SELECT id,name,query,filters_json,created_at,updated_at FROM saved_searches WHERE user_id=? ORDER BY created_at DESC", (current_user_id(request),)).fetchall()
     return {"saved_searches": [{**dict(row), "filters": json.loads(row["filters_json"])} for row in rows]}
@@ -703,6 +742,7 @@ def list_saved_searches(request: Request):
 
 @app.delete("/saved-searches/{search_id}")
 def delete_saved_search(search_id: str, request: Request):
+    require_resume_features()
     with connect() as connection:
         result = connection.execute("DELETE FROM saved_searches WHERE id=? AND user_id=?", (search_id, current_user_id(request)))
         if not result.rowcount:
@@ -712,6 +752,7 @@ def delete_saved_search(search_id: str, request: Request):
 
 @app.post("/applications", status_code=201)
 def create_application(payload: ApplicationInput, request: Request):
+    require_resume_features()
     user_id, now, item_id = current_user_id(request), datetime.now(timezone.utc).isoformat(), str(uuid.uuid4())
     applied_at = payload.applied_at or now
     with connect() as connection:
@@ -723,6 +764,7 @@ def create_application(payload: ApplicationInput, request: Request):
 
 @app.get("/applications")
 def list_applications(request: Request):
+    require_resume_features()
     with connect() as connection:
         rows = connection.execute("SELECT id,source,company,job_id,job_title,status,applied_at,notes,created_at,updated_at FROM applications WHERE user_id=? ORDER BY applied_at DESC, created_at DESC", (current_user_id(request),)).fetchall()
     return {"applications": [dict(row) for row in rows]}
@@ -730,6 +772,7 @@ def list_applications(request: Request):
 
 @app.patch("/applications/{application_id}")
 def update_application(application_id: str, payload: ApplicationInput, request: Request):
+    require_resume_features()
     user_id, now = current_user_id(request), datetime.now(timezone.utc).isoformat()
     with connect() as connection:
         result = connection.execute("""UPDATE applications SET source=?,company=?,job_id=?,job_title=?,status=?,applied_at=?,notes=?,updated_at=? WHERE id=? AND user_id=?""",
@@ -742,6 +785,7 @@ def update_application(application_id: str, payload: ApplicationInput, request: 
 
 @app.delete("/applications/{application_id}")
 def delete_application(application_id: str, request: Request):
+    require_resume_features()
     with connect() as connection:
         result = connection.execute("DELETE FROM applications WHERE id=? AND user_id=?", (application_id, current_user_id(request)))
         if not result.rowcount:
@@ -751,6 +795,7 @@ def delete_application(application_id: str, request: Request):
 
 @app.post("/resume-versions", status_code=201)
 def create_resume_version(payload: ResumeVersionInput, request: Request):
+    require_resume_features()
     user_id, now, item_id = current_user_id(request), datetime.now(timezone.utc).isoformat(), str(uuid.uuid4())
     with connect() as connection:
         ensure_user(connection, user_id)
@@ -762,6 +807,7 @@ def create_resume_version(payload: ResumeVersionInput, request: Request):
 
 @app.get("/resume-versions")
 def list_resume_versions(request: Request):
+    require_resume_features()
     with connect() as connection:
         rows = connection.execute("SELECT id,resume_id,label,notes,created_at,updated_at FROM resume_versions WHERE user_id=? ORDER BY created_at DESC", (current_user_id(request),)).fetchall()
     return {"resume_versions": [dict(row) for row in rows]}
@@ -769,12 +815,14 @@ def list_resume_versions(request: Request):
 
 @app.post("/resumes/{resume_id}/versions", status_code=201)
 def create_linked_resume_version(resume_id: str, payload: ResumeVersionInput, request: Request):
+    require_resume_features()
     payload.resume_id = resume_id
     return create_resume_version(payload, request)
 
 
 @app.get("/resumes/{resume_id}/versions")
 def list_linked_resume_versions(resume_id: str, request: Request):
+    require_resume_features()
     with connect() as connection:
         rows = connection.execute(
             "SELECT id,resume_id,label,notes,created_at,updated_at FROM resume_versions WHERE user_id=? AND resume_id=? ORDER BY created_at DESC",

@@ -27,10 +27,15 @@ Health check: /health
 6. Set `JOBMATCH_DB_PATH` only for a deliberately configured persistent local
    database. The current collector/API data access is still SQLite-backed; the
    PostgreSQL schema is prepared for the remaining data-layer migration.
-7. Configure private S3-compatible object storage for resumes. Cloudflare R2 is
-   recommended for this project because it supports private buckets and the S3
-   API without tying uploads to the Render filesystem. Set all four variables
-   below on both the Render web service and cron service:
+7. Resume uploads, matching, skill-gap suggestions, resume versions, and
+   account-owned resume workflows are intentionally disabled for the first
+   public launch. Render sets `JOBMATCH_RESUME_ENABLED=false`; job browsing,
+   health, and scheduled collection remain available.
+
+   When resume features are ready to be enabled, configure private S3-compatible
+   object storage. Cloudflare R2 is recommended because it supports private
+   buckets and the S3 API without tying uploads to the Render filesystem. Set
+   all four variables below on both the Render web service and cron service:
 
 ```text
 S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
@@ -42,7 +47,7 @@ S3_SECRET_ACCESS_KEY=<R2 secret>
    Do not enable public bucket access. The API stores private object keys and
    never returns resume bytes or signed URLs. If these variables are omitted,
    local filesystem storage is used for development only; production startup
-   rejects incomplete S3 configuration.
+   rejects incomplete S3 configuration when resume features are enabled.
 
 ## Frontend deployment on Vercel
 

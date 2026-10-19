@@ -1,6 +1,14 @@
 """Local fixtures for the Bengaluru jobs pipeline tests."""
 
+import os
+
 import pytest
+
+
+# Existing API tests exercise the optional resume/account flows. Keep their
+# local behavior explicit while production defaults to the safe disabled state.
+os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("JOBMATCH_RESUME_ENABLED", "true")
 
 
 @pytest.fixture
