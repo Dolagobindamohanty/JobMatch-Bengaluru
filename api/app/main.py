@@ -1,4 +1,5 @@
 """Job discovery and account API with SQLite local and PostgreSQL production stores."""
+import hmac
 import json
 import os
 import sqlite3
@@ -26,6 +27,7 @@ RESUME_DIR = Path(os.getenv("JOBMATCH_RESUME_DIR", ROOT / "resume_uploads"))
 LOCAL_USER_ID = "local-user"
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", 24 * 60 * 60))
 REFRESH_ON_STARTUP = os.getenv("REFRESH_ON_STARTUP", "false").lower() in {"1", "true", "yes"}
+REFRESH_TOKEN = os.getenv("REFRESH_TOKEN") or None
 RESUME_FEATURE_FLAG = "JOBMATCH_RESUME_ENABLED"
 FEATURE_DISABLED_DETAIL = "Resume and account functionality is temporarily disabled"
 _refresh_lock = threading.Lock()
@@ -354,8 +356,12 @@ def health():
 
 
 @app.post("/refresh")
-def refresh():
+def refresh(request: Request):
     """Manually request a pipeline refresh; the job fetch runs in the background."""
+    if REFRESH_TOKEN is not None and not hmac.compare_digest(
+        request.headers.get("X-Refresh-Token", ""), REFRESH_TOKEN
+    ):
+        raise HTTPException(status_code=401, detail="invalid refresh token")
     return refresh_if_stale()
 
 

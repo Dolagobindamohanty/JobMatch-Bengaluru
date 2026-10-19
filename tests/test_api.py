@@ -72,3 +72,39 @@ def test_refresh_starts_only_when_pipeline_run_is_stale(monkeypatch):
     assert result["status"] == "started"
     assert started and started[0][0][0][0] == main.sys.executable
     assert main.refresh_if_stale() == {"status": "running"}
+
+
+def test_refresh_requires_configured_token(monkeypatch):
+    monkeypatch.setattr(main, "REFRESH_TOKEN", "scheduled-refresh-secret")
+    called = []
+    monkeypatch.setattr(main, "refresh_if_stale", lambda: called.append(True) or {"status": "started"})
+    client = TestClient(main.app)
+
+    missing = client.post("/refresh")
+    incorrect = client.post("/refresh", headers={"X-Refresh-Token": "wrong"})
+
+    assert missing.status_code == 401
+    assert incorrect.status_code == 401
+    assert called == []
+
+
+def test_refresh_accepts_configured_token(monkeypatch):
+    monkeypatch.setattr(main, "REFRESH_TOKEN", "scheduled-refresh-secret")
+    monkeypatch.setattr(main, "refresh_if_stale", lambda: {"status": "started"})
+
+    response = TestClient(main.app).post(
+        "/refresh", headers={"X-Refresh-Token": "scheduled-refresh-secret"}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "started"}
+
+
+def test_refresh_does_not_require_token_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(main, "REFRESH_TOKEN", None)
+    monkeypatch.setattr(main, "refresh_if_stale", lambda: {"status": "started"})
+
+    response = TestClient(main.app).post("/refresh")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "started"}

@@ -1,0 +1,21 @@
+name: Refresh jobs
+
+on:
+  schedule:
+    # Run at the top of every sixth hour (UTC).
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render refresh
+        env:
+          RENDER_API_URL: ${{ vars.RENDER_API_URL }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+        run: >-
+          curl --fail --silent --show-error --retry 2 --retry-delay 5
+          --request POST
+          --header "X-Refresh-Token: ${REFRESH_TOKEN}"
+          "${RENDER_API_URL%/}/refresh"
