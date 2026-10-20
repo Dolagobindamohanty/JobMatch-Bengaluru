@@ -9,7 +9,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -367,18 +367,19 @@ def refresh(request: Request):
 
 @app.get("/jobs")
 def list_jobs(
-    q: str = Query("", description="Search title, company, location, description, or skills"),
+    q: Annotated[str, Query(description="Search title, company, location, description, or skills")] = "",
     ai_only: bool = False,
     company: str | None = None,
     role_category: str | None = None,
     experience_level: str | None = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(25, ge=1, le=100),
-    sort: str = Query("newest", pattern="^(newest|company|title)$"),
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 25,
+    sort: Annotated[str, Query(pattern="^(newest|company|title)$")] = "newest",
+    skill: str | None = None,
 ):
     with connect() as connection:
         if not table_exists(connection):
-            return {"jobs": [], "page": page, "page_size": page_size, "total": 0}
+            return {"jobs": [], "page": page, "page_size": page_size, "total": 0, "total_pages": 0}
         clauses = ["active=1"]
         values: list[Any] = []
         if ai_only:
@@ -397,12 +398,25 @@ def list_jobs(
             values.append(f"%{q}%")
         where = " AND ".join(clauses)
         order = {"newest": "posted DESC, last_seen DESC", "company": "company, title", "title": "title"}[sort]
-        total = connection.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", values).fetchone()[0]
         offset = (page - 1) * page_size
-        rows = connection.execute(
-            f"SELECT source, company, job_id, title, location, url AS apply_url, posted AS posted_at, description, active, is_ai, role_category, experience_level, skills FROM jobs WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
-            [*values, page_size, offset],
-        ).fetchall()
+        select = f"SELECT source, company, job_id, title, location, url AS apply_url, posted AS posted_at, description, active, is_ai, role_category, experience_level, skills FROM jobs WHERE {where} ORDER BY {order}"
+        normalized_skill = (skill or "").strip().casefold()
+        if normalized_skill:
+            # Both stores keep skills as JSON text. Parse it identically rather
+            # than relying on backend-specific JSON operators or substring LIKE.
+            # Membership must be applied before counting and slicing the page.
+            candidates = connection.execute(select, values).fetchall()
+            rows = [row for row in candidates if any(
+                isinstance(value, str) and value.strip().casefold() == normalized_skill
+                for value in parse_skills(row_to_dict(row).get("skills"))
+            )]
+            total = len(rows)
+            rows = rows[offset:offset + page_size]
+        else:
+            total = connection.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", values).fetchone()[0]
+            rows = connection.execute(
+                f"{select} LIMIT ? OFFSET ?", [*values, page_size, offset],
+            ).fetchall()
         return {"jobs": [serialize(row) for row in rows], "page": page,
                 "page_size": page_size, "total": total,
                 "total_pages": (total + page_size - 1) // page_size}
@@ -410,7 +424,8 @@ def list_jobs(
 
 @app.get("/jobs/ai")
 def ai_jobs(
-    q: str = "", page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
+    q: str = "", page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 25,
 ):
     return list_jobs(q=q, ai_only=True, page=page, page_size=page_size)
 

@@ -87,10 +87,21 @@ function normalizeJob(item: ApiJob, index: number): Job {
   };
 }
 
-export async function fetchJobs(signal?: AbortSignal): Promise<Job[]> {
+export type JobFilters = {
+  skill?: string;
+  q?: string;
+  aiOnly?: boolean;
+  page?: number;
+  pageSize?: number;
+};
+
+export type JobsPage = { jobs: Job[]; total: number; totalPages: number };
+
+async function requestJobs(params: URLSearchParams, signal?: AbortSignal): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(getApiUrl("/jobs"), {
+    const query = params.toString();
+    response = await fetch(getApiUrl(`/jobs${query ? `?${query}` : ""}`), {
       signal,
       headers: { Accept: "application/json" },
       cache: "no-store",
@@ -100,7 +111,10 @@ export async function fetchJobs(signal?: AbortSignal): Promise<Job[]> {
     throw new Error("The jobs API could not be reached. Check the API URL and CORS settings, then try again.");
   }
   await assertOk(response, "Jobs");
-  const payload: unknown = await response.json();
+  return response.json();
+}
+
+function readJobs(payload: unknown): Job[] {
   const items = Array.isArray(payload)
     ? payload
     : payload && typeof payload === "object" && Array.isArray((payload as { jobs?: unknown[] }).jobs)
@@ -108,4 +122,28 @@ export async function fetchJobs(signal?: AbortSignal): Promise<Job[]> {
       : null;
   if (!items) throw new Error("The jobs API returned an unexpected response. Try again or contact the API owner.");
   return items.map((item, index) => normalizeJob(item as ApiJob, index));
+}
+
+// Keep the original array-returning API for existing consumers.
+export async function fetchJobs(signal?: AbortSignal): Promise<Job[]> {
+  return readJobs(await requestJobs(new URLSearchParams(), signal));
+}
+
+export async function fetchJobsPage(filters: JobFilters = {}, signal?: AbortSignal): Promise<JobsPage> {
+  const params = new URLSearchParams({
+    page: String(filters.page ?? 1),
+    page_size: String(filters.pageSize ?? 20),
+    ai_only: String(filters.aiOnly ?? false),
+  });
+  if (filters.skill) params.set("skill", filters.skill);
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+  const payload = await requestJobs(params, signal);
+  const jobs = readJobs(payload);
+  const metadata = payload as { total?: unknown; total_pages?: unknown };
+  if (!Number.isSafeInteger(metadata.total) || (metadata.total as number) < 0 ||
+      !Number.isSafeInteger(metadata.total_pages) || (metadata.total_pages as number) < 0 ||
+      ((metadata.total as number) > 0 && metadata.total_pages === 0)) {
+    throw new Error("The jobs API returned invalid pagination details. Try again or contact the API owner.");
+  }
+  return { jobs, total: metadata.total as number, totalPages: metadata.total_pages as number };
 }

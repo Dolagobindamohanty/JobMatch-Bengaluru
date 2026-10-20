@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --require ./tests/register.cjs --test ./tests/*.test.cjs"
   },
   "dependencies": {
     "next": "14.2.15",
