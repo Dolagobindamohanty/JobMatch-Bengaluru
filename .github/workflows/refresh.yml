@@ -9,13 +9,33 @@ on:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Trigger Render refresh
         env:
           RENDER_API_URL: ${{ vars.RENDER_API_URL }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
-        run: >-
-          curl --fail --silent --show-error --retry 2 --retry-delay 5
-          --request POST
-          --header "X-Refresh-Token: ${REFRESH_TOKEN}"
-          "${RENDER_API_URL%/}/refresh"
+        run: |
+          set -euo pipefail
+          test -n "$RENDER_API_URL" || { echo "Missing RENDER_API_URL variable"; exit 1; }
+          test -n "$REFRESH_TOKEN" || { echo "Missing REFRESH_TOKEN secret"; exit 1; }
+          curl --fail --silent --show-error --max-time 180 \
+            --request POST \
+            --header "X-Refresh-Token: ${REFRESH_TOKEN}" \
+            "${RENDER_API_URL%/}/refresh"
+          # A launch receipt is not success. Wait for completion and real jobs.
+          for attempt in $(seq 1 40); do
+            sleep 10
+            status=$(curl --fail --silent --show-error --max-time 30 \
+              "${RENDER_API_URL%/}/refresh/status")
+            state=$(printf '%s' "$status" | jq -r '.status')
+            count=$(printf '%s' "$status" | jq -r '.active_job_count')
+            echo "Refresh state: $state; active jobs: $count"
+            if [ "$state" = "failed" ]; then exit 1; fi
+            if [ "$state" != "running" ]; then
+              test "$count" -gt 0
+              exit $?
+            fi
+          done
+          echo "Refresh did not complete within the verification window"
+          exit 1

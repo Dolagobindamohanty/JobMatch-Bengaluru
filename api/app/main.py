@@ -1,6 +1,7 @@
 """Job discovery and account API with SQLite local and PostgreSQL production stores."""
 import hmac
 import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -27,11 +28,15 @@ RESUME_DIR = Path(os.getenv("JOBMATCH_RESUME_DIR", ROOT / "resume_uploads"))
 LOCAL_USER_ID = "local-user"
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", 24 * 60 * 60))
 REFRESH_ON_STARTUP = os.getenv("REFRESH_ON_STARTUP", "false").lower() in {"1", "true", "yes"}
+REFRESH_EMPTY_ON_STARTUP = os.getenv("REFRESH_EMPTY_ON_STARTUP", "true").lower() in {"1", "true", "yes"}
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN") or None
 RESUME_FEATURE_FLAG = "JOBMATCH_RESUME_ENABLED"
 FEATURE_DISABLED_DETAIL = "Resume and account functionality is temporarily disabled"
 _refresh_lock = threading.Lock()
 _refresh_process = None
+_refresh_state = "idle"
+_refresh_exit_code = None
+logger = logging.getLogger(__name__)
 
 
 def _cors_origins():
@@ -59,37 +64,78 @@ def _last_pipeline_refresh():
     return row[0] if row else None
 
 
-def refresh_if_stale():
-    """Start one background refresh when the API is opened after 24 hours."""
-    global _refresh_process
+def _active_job_count():
+    with connect() as connection:
+        if not table_exists(connection):
+            return 0
+        return connection.execute("SELECT COUNT(*) FROM jobs WHERE active=1").fetchone()[0]
+
+
+def _poll_refresh():
+    """Reap completed children and update state while holding _refresh_lock."""
+    global _refresh_process, _refresh_state, _refresh_exit_code
+    if _refresh_process is not None:
+        code = _refresh_process.poll()
+        if code is None:
+            return True
+        _refresh_exit_code = code
+        _refresh_state = "completed" if code == 0 else "failed"
+        _refresh_process = None
+    return False
+
+
+def refresh_if_stale(*, empty_only=False):
+    """Launch one child; an empty feed takes precedence over board-run freshness."""
+    global _refresh_process, _refresh_state
     with _refresh_lock:
-        if _refresh_process is not None and _refresh_process.poll() is None:
+        if _poll_refresh():
             return {"status": "running"}
-        last = _last_pipeline_refresh()
+        try:
+            active_jobs = _active_job_count()
+            if empty_only and active_jobs:
+                return {"status": "fresh"}
+            last = _last_pipeline_refresh() if active_jobs else None
+        except Exception as error:
+            _refresh_state = "failed"
+            raise HTTPException(status_code=503, detail="database unavailable") from error
         stale = True
         if last:
             try:
                 refreshed = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                if refreshed.tzinfo is None:
+                    refreshed = refreshed.replace(tzinfo=timezone.utc)
                 stale = (datetime.now(timezone.utc) - refreshed).total_seconds() >= REFRESH_INTERVAL_SECONDS
-            except ValueError:
+            except (TypeError, ValueError):
                 stale = True
         if not stale:
             return {"status": "fresh", "last_refresh": last}
         script = ROOT / "blr_jobs_pipeline.py"
-        _refresh_process = subprocess.Popen(
-            [sys.executable, str(script)], cwd=str(ROOT),
-            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-        )
+        try:
+            _refresh_process = subprocess.Popen(
+                [sys.executable, str(script)], cwd=str(ROOT),
+                stdout=None, stderr=None,
+            )
+        except Exception as error:
+            _refresh_state = "failed"
+            raise HTTPException(status_code=503, detail="refresh unavailable") from error
+        _refresh_state = "running"
         return {"status": "started", "last_refresh": last}
 
 
 @app.on_event("startup")
 def refresh_on_open():
-    # Render web services should be available immediately after deploy.  A
-    # refresh can outlive the request and compete with a second instance, so
-    # scheduled refreshes are opt-in (use a Render cron job or POST /refresh).
-    if REFRESH_ON_STARTUP:
-        refresh_if_stale()
+    # Even the initial DB check runs off the startup/health critical path.
+    # Local SQLite stays untouched unless ordinary startup refresh is opted in.
+    if not REFRESH_ON_STARTUP and not (DATABASE_URL and REFRESH_EMPTY_ON_STARTUP):
+        return
+
+    def run():
+        try:
+            refresh_if_stale(empty_only=not REFRESH_ON_STARTUP)
+        except Exception:
+            logger.warning("Startup refresh unavailable")
+
+    threading.Thread(target=run, name="startup-refresh", daemon=True).start()
 
 
 @app.get("/")
@@ -100,7 +146,7 @@ def root():
         "version": app.version,
         "status": "ok",
         "docs": "/docs",
-        "endpoints": ["/health", "/jobs", "/jobs/ai", "/skills/trending", "/refresh"],
+        "endpoints": ["/health", "/jobs", "/jobs/ai", "/skills/trending", "/refresh", "/refresh/status"],
     }
 
 
@@ -363,6 +409,21 @@ def refresh(request: Request):
     ):
         raise HTTPException(status_code=401, detail="invalid refresh token")
     return refresh_if_stale()
+
+
+@app.get("/refresh/status")
+def refresh_status():
+    """Public, read-only lifecycle summary. Never include diagnostics or config."""
+    with _refresh_lock:
+        _poll_refresh()
+        state, code = _refresh_state, _refresh_exit_code
+    try:
+        active_jobs = _active_job_count()
+    except Exception:
+        active_jobs = None
+        if state != "running":
+            state = "failed"
+    return {"status": state, "last_exit_code": code, "active_job_count": active_jobs}
 
 
 @app.get("/jobs")

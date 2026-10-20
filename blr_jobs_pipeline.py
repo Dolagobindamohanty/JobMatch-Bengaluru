@@ -128,7 +128,7 @@ def fetch_lever(slug):
         posted = (datetime.fromtimestamp(created / 1000, tz=timezone.utc).isoformat()
                   if created else "")
         jobs.append({
-            "job_id": job["id"], "title": job.get("text", ""),
+            "job_id": str(job["id"]), "title": job.get("text", ""),
             "location": location, "url": job.get("hostedUrl", ""),
             "posted": posted, "description": description,
             "is_ai": int(is_ai(job.get("text", ""), description)),
@@ -149,7 +149,7 @@ def fetch_ashby(name):
         description = job.get("descriptionPlain", "")
         if is_blr(location, *secondary) and is_qualifying(job.get("title", ""), description):
             jobs.append({
-                "job_id": job["id"], "title": job.get("title", ""),
+                "job_id": str(job["id"]), "title": job.get("title", ""),
                 "location": location, "url": job.get("jobUrl", ""),
                 "posted": job.get("publishedAt", ""),
                 "description": description,
@@ -173,7 +173,7 @@ def fetch_workday(spec):
             continue
         external_path = job.get("externalPath", "")
         jobs.append({
-            "job_id": (job.get("bulletFields") or [external_path])[0],
+            "job_id": str((job.get("bulletFields") or [external_path])[0]),
             "title": title, "location": location,
             "url": f"https://{tenant}.wd3.myworkdayjobs.com{external_path}",
             "posted": job.get("postedOn", ""), "description": "",
@@ -223,7 +223,7 @@ def connect_db():
     return sqlite3.connect(DB_PATH)
 
 
-def upsert(conn, source, company, jobs, now):
+def upsert(conn, source, company, jobs, now, *, commit=True):
     for job in jobs:
         conn.execute("""INSERT INTO jobs
             (source, company, job_id, title, location, url, posted, description,
@@ -237,9 +237,9 @@ def upsert(conn, source, company, jobs, now):
               role_category=excluded.role_category,
               experience_level=excluded.experience_level, skills=excluded.skills,
               content_hash=excluded.content_hash""",
-            (source, company, job["job_id"], job["title"], job["location"],
+            (source, company, str(job["job_id"]), job["title"], job["location"],
              job["url"], job["posted"], job["description"], now, now,
-             job.get("is_ai", 0), job.get("role_category", "other"),
+             bool(job.get("is_ai", False)), job.get("role_category", "other"),
              job.get("experience_level", "mid"), json.dumps(job.get("skills", [])),
              content_hash(job)))
     # Run even when a source returns an empty list: an empty successful feed
@@ -247,7 +247,18 @@ def upsert(conn, source, company, jobs, now):
     # visible forever in the shared database.
     conn.execute("UPDATE jobs SET active=FALSE WHERE source=? AND company=? AND last_seen<?",
                  (source, company, now))
-    conn.commit()
+    if commit:
+        conn.commit()
+
+
+def failure_diagnostic(error, stage):
+    """Do not expose driver messages, SQL parameters, URLs, or credentials."""
+    diagnostic = f"{stage}: {type(error).__name__}"
+    original = getattr(error, "orig", error)
+    sqlstate = getattr(original, "sqlstate", None)
+    if isinstance(sqlstate, str) and re.fullmatch(r"[A-Z0-9]{5}", sqlstate):
+        diagnostic += f" (SQLSTATE {sqlstate})"
+    return diagnostic
 
 
 def run(config_path):
@@ -256,6 +267,7 @@ def run(config_path):
     conn = connect_db()
     init_db(conn)
     total = 0
+    successful_boards = 0
     for source, companies in config.items():
         fetch = FETCHERS.get(source)
         if not fetch:
@@ -281,28 +293,51 @@ def run(config_path):
                     VALUES (?, ?, CAST(? AS JSONB), CAST(? AS TIMESTAMPTZ))
                     ON CONFLICT(source, company) DO UPDATE SET
                       board_config=excluded.board_config, last_fetched_at=excluded.last_fetched_at"""
-            conn.execute(company_upsert, (source, company_name, board_config, now))
-            conn.commit()
-            run_id = conn.execute(
-                "INSERT INTO pipeline_runs(source, company, started_at) VALUES (?,?,?) RETURNING id",
-                (source, company_name, now)).fetchone()[0]
+            run_id = None
+            stage = "start run"
             try:
-                jobs = fetch(config_item)
-            except Exception as error:
-                print(f"[{source}] {company_name}: FAILED ({error})")
-                conn.execute("UPDATE pipeline_runs SET finished_at=?, error=? WHERE id=?",
-                             (datetime.now(timezone.utc).isoformat(), str(error), run_id))
+                run_id = conn.execute(
+                    "INSERT INTO pipeline_runs(source, company, started_at) VALUES (?,?,?) RETURNING id",
+                    (source, company_name, now)).fetchone()[0]
+                # Keep the run record durable even if a later write aborts.
                 conn.commit()
+                stage = "register company"
+                conn.execute(company_upsert, (source, company_name, board_config, now))
+                stage = "fetch"
+                jobs = fetch(config_item)
+                stage = "persist jobs"
+                # Job changes, deactivation, and success receipt are atomic.
+                upsert(conn, source, company_name, jobs, now, commit=False)
+                conn.execute("UPDATE pipeline_runs SET finished_at=?, jobs_found=? WHERE id=?",
+                             (datetime.now(timezone.utc).isoformat(), len(jobs), run_id))
+                conn.commit()
+            except Exception as error:
+                diagnostic = failure_diagnostic(error, stage)
+                print(f"[{source}] {company_name}: FAILED ({diagnostic})")
+                try:
+                    conn.rollback()
+                    finished = datetime.now(timezone.utc).isoformat()
+                    if run_id is None:
+                        conn.execute("""INSERT INTO pipeline_runs
+                            (source, company, started_at, finished_at, error)
+                            VALUES (?,?,?,?,?)""",
+                            (source, company_name, now, finished, diagnostic))
+                    else:
+                        conn.execute("UPDATE pipeline_runs SET finished_at=?, error=? WHERE id=?",
+                                     (finished, diagnostic, run_id))
+                    conn.commit()
+                except Exception as record_error:
+                    print(f"[{source}] {company_name}: FAILED "
+                          f"({failure_diagnostic(record_error, 'record failure')})")
+                    conn.rollback()
                 continue
-            upsert(conn, source, company_name, jobs, now)
-            conn.execute("UPDATE pipeline_runs SET finished_at=?, jobs_found=? WHERE id=?",
-                         (datetime.now(timezone.utc).isoformat(), len(jobs), run_id))
-            conn.commit()
+            successful_boards += 1
             total += len(jobs)
             print(f"[{source}] {company_name}: {len(jobs)} Bengaluru jobs")
             time.sleep(1)
     conn.close()
     print(f"Done. {total} Bengaluru jobs seen this run.")
+    return 0 if successful_boards else 1
 
 
 def stats():
@@ -324,4 +359,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="companies.json")
     parser.add_argument("--stats", action="store_true")
     args = parser.parse_args()
-    stats() if args.stats else run(args.config)
+    if args.stats:
+        stats()
+    else:
+        raise SystemExit(run(args.config))

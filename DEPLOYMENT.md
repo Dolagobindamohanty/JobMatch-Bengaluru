@@ -92,6 +92,14 @@ RENDER_API_URL=https://jobmatch-bengaluru-api.onrender.com
 The API rejects unauthenticated refresh requests with HTTP 401 whenever
 `REFRESH_TOKEN` is configured.
 
+An empty PostgreSQL feed triggers a nonblocking initial collection on API startup,
+even with `REFRESH_ON_STARTUP=false`. Set `REFRESH_EMPTY_ON_STARTUP=false` to
+disable this bootstrap explicitly. Local SQLite is not bootstrapped by default.
+`GET /refresh/status` exposes only lifecycle state, last child exit code, and
+active-job count. Collector diagnostics appear in Render server logs without
+driver messages or credentials. The scheduled workflow now waits for completion
+and requires a nonempty feed instead of treating `started` as success.
+
 ## Frontend deployment on Vercel
 
 1. Import the repository into Vercel.
