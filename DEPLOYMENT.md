@@ -55,7 +55,7 @@ Health check: /health
 
 ```text
 HF_TOKEN=<Hugging Face token with Inference Providers permission>
-HF_EMBEDDING_MODEL=thenlper/gte-large
+HF_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 HF_CHAT_MODEL=Qwen/Qwen2.5-7B-Instruct
 HF_EMBEDDING_PROVIDER=hf-inference
 HF_CHAT_PROVIDER=auto

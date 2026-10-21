@@ -18,7 +18,7 @@ from jobmatch_bengaluru.classifiers import extract_skills
 
 
 HF_TOKEN_ENV = "HF_TOKEN"
-DEFAULT_EMBEDDING_MODEL = "thenlper/gte-large"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_EMBEDDING_PROVIDER = "hf-inference"
 DEFAULT_CHAT_PROVIDER = "auto"
