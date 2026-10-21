@@ -55,8 +55,10 @@ Health check: /health
 
 ```text
 HF_TOKEN=<Hugging Face token with Inference Providers permission>
-HF_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+HF_EMBEDDING_MODEL=thenlper/gte-large
 HF_CHAT_MODEL=Qwen/Qwen2.5-7B-Instruct
+HF_EMBEDDING_PROVIDER=hf-inference
+HF_CHAT_PROVIDER=auto
 ```
 
 Keep `HF_TOKEN` private in Render Environment; never put it in GitHub, the

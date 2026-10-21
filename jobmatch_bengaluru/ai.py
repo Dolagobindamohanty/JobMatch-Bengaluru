@@ -18,8 +18,10 @@ from jobmatch_bengaluru.classifiers import extract_skills
 
 
 HF_TOKEN_ENV = "HF_TOKEN"
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_EMBEDDING_MODEL = "thenlper/gte-large"
 DEFAULT_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+DEFAULT_EMBEDDING_PROVIDER = "hf-inference"
+DEFAULT_CHAT_PROVIDER = "auto"
 
 # Tests can replace this symbol with a fake without importing huggingface_hub.
 InferenceClient = None
@@ -33,12 +35,20 @@ def chat_model() -> str:
     return os.getenv("HF_CHAT_MODEL", DEFAULT_CHAT_MODEL)
 
 
+def embedding_provider() -> str:
+    return os.getenv("HF_EMBEDDING_PROVIDER", DEFAULT_EMBEDDING_PROVIDER)
+
+
+def chat_provider() -> str:
+    return os.getenv("HF_CHAT_PROVIDER", DEFAULT_CHAT_PROVIDER)
+
+
 def provider_configured() -> bool:
     """Return whether the required provider credential is available."""
     return bool(os.getenv(HF_TOKEN_ENV, "").strip())
 
 
-def _client():
+def _client(provider: Any = None):
     if not provider_configured():
         raise RuntimeError("Hugging Face provider is not configured")
     global InferenceClient
@@ -50,7 +60,10 @@ def _client():
         InferenceClient = _InferenceClient
     # The token is passed only to the SDK; it is never included in logs or API
     # responses.
-    return InferenceClient(token=os.environ[HF_TOKEN_ENV].strip())
+    kwargs: dict[str, Any] = {"token": os.environ[HF_TOKEN_ENV].strip()}
+    if provider:
+        kwargs["provider"] = provider
+    return InferenceClient(**kwargs)
 
 
 def _flatten_numbers(value: Any) -> list[float]:
@@ -80,7 +93,9 @@ def _normalize(values: list[float]) -> list[float]:
 
 def embed_text(text: str) -> list[float]:
     """Generate and L2-normalize one embedding through Hugging Face."""
-    response = _client().feature_extraction(text or "", model=embedding_model())
+    response = _client(embedding_provider()).feature_extraction(
+        text or "", model=embedding_model()
+    )
     values = _flatten_numbers(response)
     if not values:
         raise RuntimeError("Hugging Face returned an empty embedding")
@@ -181,7 +196,7 @@ def _message_content(response: Any) -> str:
 def grounded_answer(query: str, jobs: list[dict[str, Any]]) -> str:
     """Ask the chat model to answer using only safe, retrieved job fields."""
     context = json.dumps(_safe_context(jobs), ensure_ascii=False, sort_keys=True)
-    response = _client().chat.completions.create(
+    response = _client(chat_provider()).chat.completions.create(
         model=chat_model(),
         messages=[
             {"role": "system", "content": GROUNDING_SYSTEM_PROMPT},

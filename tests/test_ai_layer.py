@@ -26,7 +26,7 @@ class FakeInferenceClient:
     calls = []
     chat = None
 
-    def __init__(self, token):
+    def __init__(self, token, provider=None):
         assert token == "test-token"
         self.chat = self.__class__.chat
 
