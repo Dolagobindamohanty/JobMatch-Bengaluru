@@ -575,6 +575,15 @@ def _rank_ai_jobs(query: str, limit: int) -> list[dict[str, Any]]:
     return [_ai_public_job(job) for job in ranked[:limit]]
 
 
+def _ai_provider_detail(error: Exception) -> str:
+    """Return only a non-sensitive provider status hint for troubleshooting."""
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int) and 400 <= status <= 599:
+        return f" (provider HTTP {status})"
+    return ""
+
+
 @app.get("/ai/status")
 def ai_status():
     return {
@@ -596,10 +605,10 @@ def ai_search(
     try:
         jobs = _rank_ai_jobs(q, limit)
     except Exception as error:
-        logger.warning("AI semantic search failed: %s", type(error).__name__)
+        logger.warning("AI semantic search failed: %s%s", type(error).__name__, _ai_provider_detail(error))
         raise HTTPException(
             status_code=503,
-            detail="AI provider unavailable; verify HF_TOKEN has 'Make calls to Inference Providers' permission and that the configured model is available.",
+            detail="AI provider unavailable" + _ai_provider_detail(error) + "; verify HF_TOKEN permissions and model/provider availability.",
         ) from error
     return {"query": q, "jobs": jobs, "model": ai_service.embedding_model()}
 
@@ -614,10 +623,10 @@ def ai_copilot(payload: CopilotInput):
         jobs = _rank_ai_jobs(payload.query, payload.limit)
         answer = ai_service.grounded_answer(payload.query, jobs)
     except Exception as error:
-        logger.warning("AI copilot failed: %s", type(error).__name__)
+        logger.warning("AI copilot failed: %s%s", type(error).__name__, _ai_provider_detail(error))
         raise HTTPException(
             status_code=503,
-            detail="AI provider unavailable; verify HF_TOKEN has 'Make calls to Inference Providers' permission and that the configured model is available.",
+            detail="AI provider unavailable" + _ai_provider_detail(error) + "; verify HF_TOKEN permissions and model/provider availability.",
         ) from error
     return {"answer": answer, "jobs": jobs, "model": ai_service.chat_model()}
 
