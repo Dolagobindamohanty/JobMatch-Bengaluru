@@ -596,7 +596,11 @@ def ai_search(
     try:
         jobs = _rank_ai_jobs(q, limit)
     except Exception as error:
-        raise HTTPException(status_code=503, detail="AI provider unavailable") from error
+        logger.warning("AI semantic search failed: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="AI provider unavailable; verify HF_TOKEN has 'Make calls to Inference Providers' permission and that the configured model is available.",
+        ) from error
     return {"query": q, "jobs": jobs, "model": ai_service.embedding_model()}
 
 
@@ -610,7 +614,11 @@ def ai_copilot(payload: CopilotInput):
         jobs = _rank_ai_jobs(payload.query, payload.limit)
         answer = ai_service.grounded_answer(payload.query, jobs)
     except Exception as error:
-        raise HTTPException(status_code=503, detail="AI provider unavailable") from error
+        logger.warning("AI copilot failed: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="AI provider unavailable; verify HF_TOKEN has 'Make calls to Inference Providers' permission and that the configured model is available.",
+        ) from error
     return {"answer": answer, "jobs": jobs, "model": ai_service.chat_model()}
 
 
