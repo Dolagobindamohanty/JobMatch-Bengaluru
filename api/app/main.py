@@ -536,7 +536,7 @@ def _rank_ai_jobs(query: str, limit: int) -> list[dict[str, Any]]:
         ).fetchall()
         jobs = []
         missing = []
-        model = ai_service.embedding_model()
+        model = ai_service.embedding_cache_key()
         for row in rows:
             job = row_to_dict(row)
             job["skills"] = parse_skills(job.get("skills"))
@@ -586,11 +586,7 @@ def _ai_provider_detail(error: Exception) -> str:
 
 @app.get("/ai/status")
 def ai_status():
-    return {
-        "configured": ai_service.provider_configured(),
-        "embedding_model": ai_service.embedding_model(),
-        "chat_model": ai_service.chat_model(),
-    }
+    return ai_service.provider_status()
 
 
 @app.get("/ai/search")
@@ -606,10 +602,7 @@ def ai_search(
         jobs = _rank_ai_jobs(q, limit)
     except Exception as error:
         logger.warning("AI semantic search failed: %s%s", type(error).__name__, _ai_provider_detail(error))
-        raise HTTPException(
-            status_code=503,
-            detail=f"AI provider unavailable ({type(error).__name__})" + _ai_provider_detail(error) + "; verify HF_TOKEN permissions and model/provider availability.",
-        ) from error
+        raise HTTPException(status_code=503, detail="AI provider unavailable") from error
     return {"query": q, "jobs": jobs, "model": ai_service.embedding_model()}
 
 
@@ -624,11 +617,12 @@ def ai_copilot(payload: CopilotInput):
         answer = ai_service.grounded_answer(payload.query, jobs)
     except Exception as error:
         logger.warning("AI copilot failed: %s%s", type(error).__name__, _ai_provider_detail(error))
-        raise HTTPException(
-            status_code=503,
-            detail=f"AI provider unavailable ({type(error).__name__})" + _ai_provider_detail(error) + "; verify HF_TOKEN permissions and model/provider availability.",
-        ) from error
-    return {"answer": answer, "jobs": jobs, "model": ai_service.chat_model()}
+        raise HTTPException(status_code=503, detail="AI provider unavailable") from error
+    return {
+        "answer": answer,
+        "jobs": jobs,
+        "model": ai_service.chat_model() if ai_service.provider_mode() == "huggingface" else None,
+    }
 
 
 @app.get("/jobs/ai")

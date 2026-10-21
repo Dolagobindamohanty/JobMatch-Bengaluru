@@ -1,4 +1,4 @@
-"""Backend tests for the token-gated, resume-independent AI layer."""
+"""Backend tests for the local-first, resume-independent AI layer."""
 
 import json
 import sqlite3
@@ -37,6 +37,23 @@ class FakeInferenceClient:
         return [[0.0, 4.0]]
 
 
+class FakeTextEmbedding:
+    instances = 0
+    calls = []
+
+    def __init__(self, model_name):
+        self.model_name = model_name
+        self.__class__.instances += 1
+
+    def embed(self, texts):
+        for text in texts:
+            self.__class__.calls.append((text, self.model_name))
+            if "python" in text.lower():
+                yield [3.0, 0.0]
+            else:
+                yield [0.0, 4.0]
+
+
 def _seed_jobs(path):
     connection = sqlite3.connect(path)
     pipeline.init_db(connection)
@@ -65,6 +82,7 @@ def _seed_jobs(path):
 
 
 def test_ai_search_requires_token_and_status_has_no_secret(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_PROVIDER", "huggingface")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "jobs.db")
     client = TestClient(main.app)
@@ -73,12 +91,14 @@ def test_ai_search_requires_token_and_status_has_no_secret(monkeypatch, tmp_path
     assert response.status_code == 503
     status = client.get("/ai/status")
     assert status.status_code == 200
+    assert status.json()["provider"] == "huggingface"
     assert status.json()["configured"] is False
     assert "token" not in json.dumps(status.json()).lower()
     assert "secret" not in json.dumps(status.json()).lower()
 
 
 def test_embedding_normalizes_nested_provider_output(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "huggingface")
     monkeypatch.setenv("HF_TOKEN", "test-token")
     FakeInferenceClient.calls = []
     monkeypatch.setattr(ai, "InferenceClient", FakeInferenceClient)
@@ -86,6 +106,7 @@ def test_embedding_normalizes_nested_provider_output(monkeypatch):
 
 
 def test_semantic_search_reuses_job_embedding_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_PROVIDER", "huggingface")
     monkeypatch.setenv("HF_TOKEN", "test-token")
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "jobs.db")
     FakeInferenceClient.calls = []
@@ -109,6 +130,7 @@ def test_semantic_search_reuses_job_embedding_cache(monkeypatch, tmp_path):
 
 
 def test_copilot_uses_grounded_prompt_and_exact_response_shape(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_PROVIDER", "huggingface")
     monkeypatch.setenv("HF_TOKEN", "test-token")
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "jobs.db")
     chat = FakeChat(SimpleNamespace(
@@ -130,6 +152,70 @@ def test_copilot_uses_grounded_prompt_and_exact_response_shape(monkeypatch, tmp_
     assert "Never invent" in messages[0]["content"]
     assert "https://apply/1" in messages[1]["content"]
     assert "raw_text" not in messages[1]["content"]
+    assert "test-token" not in json.dumps(response.json())
+
+
+def test_local_status_and_embedding_use_fastembed_without_hf_token(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "local")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    FakeTextEmbedding.instances = 0
+    FakeTextEmbedding.calls = []
+    monkeypatch.setattr(ai, "TextEmbedding", FakeTextEmbedding)
+    monkeypatch.setattr(ai, "_local_embedding_instance", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_model", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_class", None)
+
+    status = ai.provider_status()
+    assert status == {
+        "provider": "local",
+        "configured": True,
+        "embedding_model": "BAAI/bge-small-en-v1.5",
+        "chat_model": "Qwen/Qwen2.5-7B-Instruct",
+        "hosted_chat": False,
+    }
+    assert ai.embed_text("python") == [1.0, 0.0]
+    assert "test-token" not in json.dumps(status)
+
+
+def test_local_semantic_search_reuses_job_embedding_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_PROVIDER", "local")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "jobs.db")
+    FakeTextEmbedding.instances = 0
+    FakeTextEmbedding.calls = []
+    monkeypatch.setattr(ai, "TextEmbedding", FakeTextEmbedding)
+    monkeypatch.setattr(ai, "_local_embedding_instance", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_model", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_class", None)
+    _seed_jobs(main.DB_PATH)
+
+    client = TestClient(main.app)
+    first = client.get("/ai/search", params={"q": "python", "limit": 1})
+    second = client.get("/ai/search", params={"q": "python", "limit": 1})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["jobs"][0]["company"] == "Acme"
+    assert first.json()["model"] == "BAAI/bge-small-en-v1.5"
+    assert FakeTextEmbedding.instances == 1
+    assert len(FakeTextEmbedding.calls) == 4
+    with sqlite3.connect(main.DB_PATH) as connection:
+        assert connection.execute("SELECT model FROM ai_job_embeddings").fetchone()[0] == "local:BAAI/bge-small-en-v1.5"
+
+
+def test_local_copilot_is_transparent_and_includes_application_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_PROVIDER", "local")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "jobs.db")
+    monkeypatch.setattr(ai, "TextEmbedding", FakeTextEmbedding)
+    _seed_jobs(main.DB_PATH)
+
+    response = TestClient(main.app).post(
+        "/ai/copilot", json={"query": "Which Python role should I apply to?", "limit": 1}
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] is None
+    assert "not LLM-generated" in response.json()["answer"]
+    assert "Acme" in response.json()["answer"]
+    assert "https://apply/1" in response.json()["answer"]
     assert "test-token" not in json.dumps(response.json())
 
 

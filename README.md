@@ -2,8 +2,9 @@
 
 JobMatch Bengaluru is a Bengaluru-focused AI job-market intelligence product. It
 collects public employer-board postings, classifies IT and AI/ML roles, extracts
-skills, supports exact skill discovery, and optionally uses Hugging Face hosted
-embeddings for semantic job search and a grounded AI job copilot. Resume parsing
+skills, supports exact skill discovery, and provides local semantic search with
+a grounded AI job copilot by default. Hugging Face hosted embeddings and chat
+are optional when hosted-model credits exist. Resume parsing
 and resume-to-job matching exist behind feature flags but remain disabled in the
 current public launch.
 
@@ -34,7 +35,10 @@ Next.js frontend and Render (or another Python host) for the FastAPI backend.
 
 ## AI layer
 
-When `HF_TOKEN` is configured on the API, the following endpoints are available:
+Local semantic AI is the default no-credit mode. FastEmbed loads the local
+`BAAI/bge-small-en-v1.5` embedding model on first AI search, so startup and
+ordinary job browsing do not download a model. The following endpoints are
+available when the local embedding dependency is installed:
 
 ```text
 GET  /ai/status
@@ -42,11 +46,17 @@ GET  /ai/search?q=Python%20data%20platform
 POST /ai/copilot
 ```
 
-The semantic layer embeds the query and active jobs, caches job embeddings in the
-database, ranks jobs by cosine similarity, and sends only the retrieved public
-job context to the chat model. The copilot is grounded to those postings and
-must include the source application URLs rather than inventing requirements,
-salary, or company facts. Normal keyword/skill search works without an AI token.
+The semantic layer embeds the query and active jobs locally, caches job
+embeddings in the database, and ranks jobs by cosine similarity. In local mode
+the copilot returns a transparent grounded summary from the retrieved job
+fields and exact application URLs; it does not claim to be LLM-generated.
+
+Set `AI_PROVIDER=huggingface` and provide `HF_TOKEN` only when Hugging Face
+hosted chat/embeddings and available credits are desired. Hosted mode keeps the
+grounding rules: it sends only retrieved public job context to the chat model
+and must include source application URLs rather than inventing requirements,
+salary, or company facts. Normal keyword/skill search works without any AI
+token.
 
 ## Data sources
 

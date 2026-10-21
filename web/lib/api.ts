@@ -97,10 +97,14 @@ export type JobFilters = {
 
 export type JobsPage = { jobs: Job[]; total: number; totalPages: number };
 
+export type AiProvider = "local" | "huggingface";
+
 export type AiStatus = {
+  provider: AiProvider;
   configured: boolean;
   embeddingModel: string;
   chatModel: string;
+  hostedChat: boolean;
 };
 
 export type AiSearchResult = Job & {
@@ -112,6 +116,7 @@ export type AiCopilotResponse = {
   answer: string;
   jobs: AiSearchResult[];
   model: string;
+  mode?: AiProvider;
 };
 
 async function requestJobs(params: URLSearchParams, signal?: AbortSignal): Promise<unknown> {
@@ -187,13 +192,17 @@ export async function fetchAiStatus(signal?: AbortSignal): Promise<AiStatus> {
     signal,
     headers: { Accept: "application/json" },
   }, "AI status");
-  if (!isRecord(payload) || typeof payload.configured !== "boolean") {
+  if (!isRecord(payload) ||
+      (payload.provider !== "local" && payload.provider !== "huggingface") ||
+      typeof payload.configured !== "boolean") {
     throw new Error("The AI status response was invalid. Try again or contact the API owner.");
   }
   return {
+    provider: payload.provider,
     configured: payload.configured,
     embeddingModel: typeof payload.embedding_model === "string" ? payload.embedding_model : "",
     chatModel: typeof payload.chat_model === "string" ? payload.chat_model : "",
+    hostedChat: payload.hosted_chat === true,
   };
 }
 
@@ -234,8 +243,15 @@ export async function askAiCopilot(query: string, limit = 5, signal?: AbortSigna
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify({ query: trimmedQuery, limit }),
   }, "AI copilot");
-  if (!isRecord(payload) || typeof payload.answer !== "string" || typeof payload.model !== "string") {
+  if (!isRecord(payload) || typeof payload.answer !== "string" ||
+      (typeof payload.model !== "string" && payload.model !== null && payload.model !== undefined) ||
+      (payload.mode !== undefined && payload.mode !== "local" && payload.mode !== "huggingface")) {
     throw new Error("The AI copilot response was invalid. Try again or contact the API owner.");
   }
-  return { answer: payload.answer, jobs: readAiJobs(payload.jobs), model: payload.model };
+  return {
+    answer: payload.answer,
+    jobs: readAiJobs(payload.jobs),
+    model: typeof payload.model === "string" ? payload.model : "",
+    mode: payload.mode === "local" || payload.mode === "huggingface" ? payload.mode : undefined,
+  };
 }

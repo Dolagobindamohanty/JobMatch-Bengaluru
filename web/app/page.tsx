@@ -84,9 +84,11 @@ function AiJobCopilot() {
     ? "AI availability could not be checked; Ask AI may be unavailable."
     : status === null
       ? "Checking the configured AI provider…"
-      : status.configured
-        ? "Uses the configured AI provider; availability can vary."
-        : "No AI provider is configured, so Ask AI may be unavailable.";
+      : status.provider === "local"
+        ? status.configured ? "Local semantic AI" : "Local semantic AI is unavailable."
+        : status.hostedChat
+          ? status.configured ? "Hosted Hugging Face chat" : "Hosted Hugging Face chat is unavailable."
+          : status.configured ? "Semantic search is configured; hosted chat is unavailable." : "No AI provider is configured, so Ask AI may be unavailable.";
 
   return (
     <section className="copilot" aria-labelledby="copilot-heading">

@@ -69,9 +69,12 @@ test("AI status and semantic search use the public API request shapes", async ()
     assert.equal(request.pathname, "/api/ai/status");
     assert.equal(options.method, "GET");
     assert.equal(options.cache, "no-store");
-    return Response.json({ configured: true, embedding_model: "embed-model", chat_model: "chat-model" });
+    return Response.json({ provider: "local", configured: true, embedding_model: "embed-model", chat_model: "chat-model", hosted_chat: false });
   };
-  assert.deepEqual(await fetchAiStatus(), { configured: true, embeddingModel: "embed-model", chatModel: "chat-model" });
+  assert.deepEqual(await fetchAiStatus(), { provider: "local", configured: true, embeddingModel: "embed-model", chatModel: "chat-model", hostedChat: false });
+
+  global.fetch = async () => Response.json({ provider: "huggingface", configured: true, embedding_model: "embed-model", chat_model: "chat-model", hosted_chat: true });
+  assert.deepEqual(await fetchAiStatus(), { provider: "huggingface", configured: true, embeddingModel: "embed-model", chatModel: "chat-model", hostedChat: true });
 
   global.fetch = async (url, options) => {
     const request = new URL(url);
@@ -113,6 +116,21 @@ test("AI copilot keeps an empty citation list safe and surfaces service or shape
   global.fetch = async () => Response.json({ answer: "missing jobs", model: "chat-model" });
   await assert.rejects(askAiCopilot("python"), /unexpected job list/);
   await assert.rejects(askAiCopilot("   "), /Enter a question/);
+});
+
+test("AI copilot parses local grounded responses with an empty model", async () => {
+  global.fetch = async () => Response.json({
+    answer: "Local grounded summary (not LLM-generated):\nRetrieved 1 job(s) for this search.",
+    mode: "local",
+    model: "",
+    jobs: [{ job_id: "local-1", company: "Acme", title: "Python Engineer", url: "https://apply/local-1", matched_skills: ["python"] }],
+  });
+  const response = await askAiCopilot("python roles");
+  assert.equal(response.mode, "local");
+  assert.equal(response.model, "");
+  assert.match(response.answer, /Local grounded summary/);
+  assert.equal(response.jobs[0].id, "local-1");
+  assert.deepEqual(response.jobs[0].matchedSkills, ["python"]);
 });
 
 test("rejects missing or invalid pagination rather than inventing feed totals", async () => {

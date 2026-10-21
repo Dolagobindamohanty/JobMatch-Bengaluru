@@ -1,8 +1,8 @@
-"""Lazy Hugging Face powered semantic search and grounded job assistance.
+"""Local-first semantic search and grounded job assistance.
 
-The module deliberately has no import-time dependency on ``huggingface_hub`` or
-an API token.  This keeps local database work, the existing resume flows, and
-test collection usable when AI dependencies are not installed.
+FastEmbed and its model are loaded only when local semantic search is used.
+Hugging Face remains an optional hosted provider for deployments that have a
+token and want hosted chat responses.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from jobmatch_bengaluru.classifiers import extract_skills
 
 
 HF_TOKEN_ENV = "HF_TOKEN"
+AI_PROVIDER_ENV = "AI_PROVIDER"
+AI_LOCAL_EMBEDDING_MODEL_ENV = "AI_LOCAL_EMBEDDING_MODEL"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_EMBEDDING_PROVIDER = "hf-inference"
@@ -25,9 +27,23 @@ DEFAULT_CHAT_PROVIDER = "auto"
 
 # Tests can replace this symbol with a fake without importing huggingface_hub.
 InferenceClient = None
+# FastEmbed is intentionally imported lazily. Tests can replace this symbol
+# with a fake without installing the package or downloading a model.
+TextEmbedding = None
+_local_embedding_instance = None
+_local_embedding_instance_model = None
+_local_embedding_instance_class = None
+
+
+def provider_mode() -> str:
+    """Return the configured provider, defaulting safely to local mode."""
+    configured = os.getenv(AI_PROVIDER_ENV, "local").strip().lower()
+    return "huggingface" if configured == "huggingface" else "local"
 
 
 def embedding_model() -> str:
+    if provider_mode() == "local":
+        return os.getenv(AI_LOCAL_EMBEDDING_MODEL_ENV, DEFAULT_EMBEDDING_MODEL)
     return os.getenv("HF_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
 
 
@@ -43,9 +59,42 @@ def chat_provider() -> str:
     return os.getenv("HF_CHAT_PROVIDER", DEFAULT_CHAT_PROVIDER)
 
 
+def _fastembed_class():
+    global TextEmbedding
+    if TextEmbedding is None:
+        try:
+            from fastembed import TextEmbedding as _TextEmbedding
+        except Exception:
+            return None
+        TextEmbedding = _TextEmbedding
+    return TextEmbedding
+
+
+def hosted_chat_available() -> bool:
+    return provider_mode() == "huggingface" and bool(os.getenv(HF_TOKEN_ENV, "").strip())
+
+
 def provider_configured() -> bool:
-    """Return whether the required provider credential is available."""
+    """Return whether the selected provider can be used without a request."""
+    if provider_mode() == "local":
+        return _fastembed_class() is not None
     return bool(os.getenv(HF_TOKEN_ENV, "").strip())
+
+
+def provider_status() -> dict[str, Any]:
+    """Return safe provider state without exposing credentials or exceptions."""
+    return {
+        "provider": provider_mode(),
+        "configured": provider_configured(),
+        "embedding_model": embedding_model(),
+        "chat_model": chat_model(),
+        "hosted_chat": hosted_chat_available(),
+    }
+
+
+def status() -> dict[str, Any]:
+    """Compatibility name for callers that want provider status directly."""
+    return provider_status()
 
 
 def _client(provider: Any = None):
@@ -91,8 +140,33 @@ def _normalize(values: list[float]) -> list[float]:
     return [value / magnitude for value in values]
 
 
+def _local_embed_text(text: str) -> list[float]:
+    global _local_embedding_instance, _local_embedding_instance_model
+    global _local_embedding_instance_class
+    embedding_class = _fastembed_class()
+    if embedding_class is None:
+        raise RuntimeError("Local embedding provider is unavailable")
+    model_name = embedding_model()
+    if (_local_embedding_instance is None or
+            _local_embedding_instance_model != model_name or
+            _local_embedding_instance_class is not embedding_class):
+        _local_embedding_instance = embedding_class(model_name=model_name)
+        _local_embedding_instance_model = model_name
+        _local_embedding_instance_class = embedding_class
+    try:
+        response = next(iter(_local_embedding_instance.embed([text or ""])))
+    except (StopIteration, TypeError, ValueError) as error:
+        raise RuntimeError("Local embedding provider returned no embedding") from error
+    values = _flatten_numbers(response)
+    if not values:
+        raise RuntimeError("Local embedding provider returned an empty embedding")
+    return _normalize(values)
+
+
 def embed_text(text: str) -> list[float]:
-    """Generate and L2-normalize one embedding through Hugging Face."""
+    """Generate and L2-normalize one local or hosted embedding."""
+    if provider_mode() == "local":
+        return _local_embed_text(text)
     response = _client(embedding_provider()).feature_extraction(
         text or "", model=embedding_model()
     )
@@ -100,6 +174,13 @@ def embed_text(text: str) -> list[float]:
     if not values:
         raise RuntimeError("Hugging Face returned an empty embedding")
     return _normalize(values)
+
+
+def embedding_cache_key() -> str:
+    """Identify both provider and model so cached vectors cannot cross modes."""
+    if provider_mode() == "local":
+        return f"local:{embedding_model()}"
+    return f"huggingface:{embedding_provider()}:{embedding_model()}"
 
 
 def cosine_similarity(left: Iterable[float], right: Iterable[float]) -> float:
@@ -194,7 +275,31 @@ def _message_content(response: Any) -> str:
 
 
 def grounded_answer(query: str, jobs: list[dict[str, Any]]) -> str:
-    """Ask the chat model to answer using only safe, retrieved job fields."""
+    """Answer using only safe, retrieved job fields and exact application URLs."""
+    if provider_mode() == "local":
+        context = _safe_context(jobs)
+        if not context:
+            return "Local grounded summary (not LLM-generated): No retrieved jobs were available."
+        lines = [
+            "Local grounded summary (not LLM-generated):",
+            f"Retrieved {len(context)} job(s) for this search.",
+        ]
+        for index, job in enumerate(context, start=1):
+            details = []
+            if job.get("title"):
+                details.append(f"Title: {job['title']}")
+            if job.get("company"):
+                details.append(f"Company: {job['company']}")
+            if job.get("location"):
+                details.append(f"Location: {job['location']}")
+            skills = job.get("skills") or []
+            if isinstance(skills, list) and skills:
+                details.append("Skills: " + ", ".join(str(skill) for skill in skills))
+            lines.append(f"{index}. " + " | ".join(details))
+            if job.get("url"):
+                lines.append(f"   Apply: {job['url']}")
+        return "\n".join(lines)
+
     context = json.dumps(_safe_context(jobs), ensure_ascii=False, sort_keys=True)
     response = _client(chat_provider()).chat.completions.create(
         model=chat_model(),
