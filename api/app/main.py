@@ -608,7 +608,7 @@ def ai_search(
         logger.warning("AI semantic search failed: %s%s", type(error).__name__, _ai_provider_detail(error))
         raise HTTPException(
             status_code=503,
-            detail="AI provider unavailable" + _ai_provider_detail(error) + "; verify HF_TOKEN permissions and model/provider availability.",
+            detail=f"AI provider unavailable ({type(error).__name__})" + _ai_provider_detail(error) + "; verify HF_TOKEN permissions and model/provider availability.",
         ) from error
     return {"query": q, "jobs": jobs, "model": ai_service.embedding_model()}
 
@@ -626,7 +626,7 @@ def ai_copilot(payload: CopilotInput):
         logger.warning("AI copilot failed: %s%s", type(error).__name__, _ai_provider_detail(error))
         raise HTTPException(
             status_code=503,
-            detail="AI provider unavailable" + _ai_provider_detail(error) + "; verify HF_TOKEN permissions and model/provider availability.",
+            detail=f"AI provider unavailable ({type(error).__name__})" + _ai_provider_detail(error) + "; verify HF_TOKEN permissions and model/provider availability.",
         ) from error
     return {"answer": answer, "jobs": jobs, "model": ai_service.chat_model()}
 
