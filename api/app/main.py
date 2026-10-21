@@ -594,7 +594,7 @@ def ai_search(
     q: str = Query(..., min_length=1, max_length=2000),
     limit: Annotated[int, Query(ge=1, le=100)] = 10,
 ):
-    if not ai_service.provider_configured():
+    if not ai_service.embedding_configured():
         raise HTTPException(status_code=503, detail="AI provider unavailable")
     if not q.strip():
         raise HTTPException(status_code=422, detail="Query must not be empty")
@@ -608,7 +608,7 @@ def ai_search(
 
 @app.post("/ai/copilot")
 def ai_copilot(payload: CopilotInput):
-    if not ai_service.provider_configured():
+    if not ai_service.embedding_configured():
         raise HTTPException(status_code=503, detail="AI provider unavailable")
     if not payload.query.strip():
         raise HTTPException(status_code=422, detail="Query must not be empty")
@@ -621,7 +621,7 @@ def ai_copilot(payload: CopilotInput):
     return {
         "answer": answer,
         "jobs": jobs,
-        "model": ai_service.chat_model() if ai_service.provider_mode() == "huggingface" else None,
+        "model": ai_service.chat_model() if ai_service.chat_mode() == "huggingface" else None,
     }
 
 

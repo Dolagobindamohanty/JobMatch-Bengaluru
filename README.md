@@ -51,12 +51,16 @@ embeddings in the database, and ranks jobs by cosine similarity. In local mode
 the copilot returns a transparent grounded summary from the retrieved job
 fields and exact application URLs; it does not claim to be LLM-generated.
 
-Set `AI_PROVIDER=huggingface` and provide `HF_TOKEN` only when Hugging Face
-hosted chat/embeddings and available credits are desired. Hosted mode keeps the
-grounding rules: it sends only retrieved public job context to the chat model
-and must include source application URLs rather than inventing requirements,
-salary, or company facts. Normal keyword/skill search works without any AI
-token.
+Local embeddings and search stay enabled by default. Hosted Hugging Face chat
+is independent and optional: set `AI_CHAT_MODE=huggingface` and provide
+`HF_TOKEN` to enable it while leaving embeddings local. If hosted chat is
+unavailable or rejected, the copilot returns the local grounded summary. To
+explicitly select hosted embeddings as well, set `AI_EMBEDDING_MODE=huggingface`.
+The older `AI_PROVIDER=huggingface` setting remains supported as a compatibility
+shortcut for enabling both hosted modes. Hosted mode keeps the grounding rules:
+it sends only retrieved public job context to the chat model and must include
+source application URLs rather than inventing requirements, salary, or company
+facts. Normal keyword/skill search works without any AI token.
 
 ## Data sources
 

@@ -57,25 +57,26 @@ Health check: /health
    Hugging Face token or hosted-model credits are required for local semantic
    search. To select another local model, set `AI_LOCAL_EMBEDDING_MODEL`.
 
-   Hugging Face hosted embeddings and chat are optional when hosted-model
-   credits exist. To enable that mode on the Render API service, set:
+    Hugging Face hosted chat is optional when hosted-model credits exist. To
+    enable hosted chat while keeping semantic embeddings local, set:
 
 ```text
-AI_PROVIDER=huggingface
+AI_CHAT_MODE=huggingface
 HF_TOKEN=<Hugging Face token with Inference Providers permission>
-HF_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 HF_CHAT_MODEL=Qwen/Qwen2.5-7B-Instruct
-HF_EMBEDDING_PROVIDER=hf-inference
 HF_CHAT_PROVIDER=auto
 ```
 
 Keep `HF_TOKEN` private in Render Environment; never put it in GitHub, the
-frontend, a URL, or a committed file. With the default `AI_PROVIDER=local`,
-`/ai/search` and `/ai/copilot` use local embeddings and the copilot returns a
-transparent grounded summary rather than claiming an LLM response. With
-`AI_PROVIDER=huggingface` and a valid token, hosted semantic embeddings and a
-grounded hosted chat copilot are available. The API stores only cached job
-embeddings, not the token or resumes.
+    frontend, a URL, or a committed file. With the default local modes,
+    `/ai/search` and `/ai/copilot` use local embeddings and the copilot returns a
+    transparent grounded summary. If hosted chat is enabled but unavailable,
+    the same local summary is returned. To explicitly use hosted embeddings,
+    set `AI_EMBEDDING_MODE=huggingface` and optionally configure
+    `HF_EMBEDDING_MODEL` and `HF_EMBEDDING_PROVIDER`. The older
+    `AI_PROVIDER=huggingface` setting remains supported as a compatibility
+    shortcut for both hosted modes. The API stores only cached job embeddings,
+    not the token or resumes.
 
    When resume features are ready to be enabled, configure private S3-compatible
    object storage. Cloudflare R2 is recommended because it supports private

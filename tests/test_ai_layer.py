@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from types import SimpleNamespace
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -24,7 +25,7 @@ class FakeChat:
 
 class FakeInferenceClient:
     calls = []
-    chat = None
+    chat: Any = None
 
     def __init__(self, token, provider=None):
         assert token == "test-token"
@@ -35,6 +36,12 @@ class FakeInferenceClient:
         if "python" in text.lower():
             return [[3.0, 0.0]]
         return [[0.0, 4.0]]
+
+
+class ProviderError(Exception):
+    def __init__(self, status_code):
+        super().__init__(f"provider HTTP {status_code}")
+        self.response = SimpleNamespace(status_code=status_code)
 
 
 class FakeTextEmbedding:
@@ -169,12 +176,86 @@ def test_local_status_and_embedding_use_fastembed_without_hf_token(monkeypatch):
     assert status == {
         "provider": "local",
         "configured": True,
+        "embedding_mode": "local",
+        "embedding_configured": True,
+        "chat_mode": "local",
+        "chat_configured": True,
         "embedding_model": "BAAI/bge-small-en-v1.5",
         "chat_model": "Qwen/Qwen2.5-7B-Instruct",
         "hosted_chat": False,
     }
     assert ai.embed_text("python") == [1.0, 0.0]
     assert "test-token" not in json.dumps(status)
+
+
+def test_default_modes_keep_embeddings_local_without_hf_configuration(monkeypatch):
+    monkeypatch.delenv("AI_PROVIDER", raising=False)
+    monkeypatch.delenv("AI_EMBEDDING_MODE", raising=False)
+    monkeypatch.delenv("AI_CHAT_MODE", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(ai, "TextEmbedding", FakeTextEmbedding)
+    monkeypatch.setattr(ai, "InferenceClient", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_model", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_class", None)
+
+    status = ai.provider_status()
+    assert status["embedding_mode"] == "local"
+    assert status["chat_mode"] == "local"
+    assert status["embedding_configured"] is True
+    assert status["hosted_chat"] is False
+    assert ai.embed_text("python") == [1.0, 0.0]
+
+
+def test_hosted_chat_can_be_enabled_without_hosted_embeddings(monkeypatch):
+    monkeypatch.setenv("AI_EMBEDDING_MODE", "local")
+    monkeypatch.setenv("AI_CHAT_MODE", "huggingface")
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(ai, "TextEmbedding", FakeTextEmbedding)
+    chat = FakeChat(SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Hosted answer"))]
+    ))
+    FakeInferenceClient.chat = chat
+    monkeypatch.setattr(ai, "InferenceClient", FakeInferenceClient)
+    monkeypatch.setattr(ai, "_local_embedding_instance", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_model", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_class", None)
+
+    status = ai.provider_status()
+    assert status["embedding_mode"] == "local"
+    assert status["chat_mode"] == "huggingface"
+    assert status["hosted_chat"] is True
+    assert ai.embedding_cache_key().startswith("local:")
+    assert ai.grounded_answer(
+        "Which role?", [{"title": "Python Engineer", "url": "https://apply/1"}]
+    ) == "Hosted answer"
+    assert chat.calls[-1]["model"] == "Qwen/Qwen2.5-7B-Instruct"
+
+
+def test_hosted_chat_http_402_falls_back_to_local_grounded_summary(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_EMBEDDING_MODE", "local")
+    monkeypatch.setenv("AI_CHAT_MODE", "huggingface")
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "jobs.db")
+    FakeTextEmbedding.instances = 0
+    FakeTextEmbedding.calls = []
+    monkeypatch.setattr(ai, "TextEmbedding", FakeTextEmbedding)
+    chat = FakeChat(None)
+    chat.create = lambda **kwargs: (_ for _ in ()).throw(ProviderError(402))
+    FakeInferenceClient.chat = chat
+    monkeypatch.setattr(ai, "InferenceClient", FakeInferenceClient)
+    monkeypatch.setattr(ai, "_local_embedding_instance", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_model", None)
+    monkeypatch.setattr(ai, "_local_embedding_instance_class", None)
+    _seed_jobs(main.DB_PATH)
+
+    response = TestClient(main.app).post(
+        "/ai/copilot", json={"query": "Which Python role should I apply to?", "limit": 1}
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] == "Qwen/Qwen2.5-7B-Instruct"
+    assert "Local grounded summary (not LLM-generated)" in response.json()["answer"]
+    assert "https://apply/1" in response.json()["answer"]
 
 
 def test_local_semantic_search_reuses_job_embedding_cache(monkeypatch, tmp_path):

@@ -19,6 +19,8 @@ from jobmatch_bengaluru.classifiers import extract_skills
 
 HF_TOKEN_ENV = "HF_TOKEN"
 AI_PROVIDER_ENV = "AI_PROVIDER"
+AI_EMBEDDING_MODE_ENV = "AI_EMBEDDING_MODE"
+AI_CHAT_MODE_ENV = "AI_CHAT_MODE"
 AI_LOCAL_EMBEDDING_MODEL_ENV = "AI_LOCAL_EMBEDDING_MODEL"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_CHAT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
@@ -35,14 +37,41 @@ _local_embedding_instance_model = None
 _local_embedding_instance_class = None
 
 
+def _configured_mode(environment_name: str) -> str | None:
+    configured = os.getenv(environment_name)
+    if configured is None:
+        return None
+    configured = configured.strip().lower()
+    return configured if configured in {"local", "huggingface"} else "local"
+
+
+def _legacy_provider_mode() -> str | None:
+    configured = os.getenv(AI_PROVIDER_ENV)
+    if configured is None:
+        return None
+    configured = configured.strip().lower()
+    return configured if configured in {"local", "huggingface"} else "local"
+
+
+def embedding_mode() -> str:
+    """Return the embedding mode, local by default and independent of chat."""
+    return (_configured_mode(AI_EMBEDDING_MODE_ENV) or
+            _legacy_provider_mode() or "local")
+
+
+def chat_mode() -> str:
+    """Return the optional chat mode without changing semantic search."""
+    return (_configured_mode(AI_CHAT_MODE_ENV) or
+            _legacy_provider_mode() or "local")
+
+
 def provider_mode() -> str:
-    """Return the configured provider, defaulting safely to local mode."""
-    configured = os.getenv(AI_PROVIDER_ENV, "local").strip().lower()
-    return "huggingface" if configured == "huggingface" else "local"
+    """Compatibility alias for callers that historically meant embeddings."""
+    return embedding_mode()
 
 
 def embedding_model() -> str:
-    if provider_mode() == "local":
+    if embedding_mode() == "local":
         return os.getenv(AI_LOCAL_EMBEDDING_MODEL_ENV, DEFAULT_EMBEDDING_MODEL)
     return os.getenv("HF_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
 
@@ -71,21 +100,38 @@ def _fastembed_class():
 
 
 def hosted_chat_available() -> bool:
-    return provider_mode() == "huggingface" and bool(os.getenv(HF_TOKEN_ENV, "").strip())
+    return chat_mode() == "huggingface" and bool(os.getenv(HF_TOKEN_ENV, "").strip())
+
+
+def embedding_configured() -> bool:
+    """Return whether the configured embedding mode can be used."""
+    if embedding_mode() == "local":
+        return _fastembed_class() is not None
+    return bool(os.getenv(HF_TOKEN_ENV, "").strip())
+
+
+def chat_configured() -> bool:
+    """Return whether optional hosted chat has a token when enabled."""
+    if chat_mode() == "local":
+        return True
+    return bool(os.getenv(HF_TOKEN_ENV, "").strip())
 
 
 def provider_configured() -> bool:
-    """Return whether the selected provider can be used without a request."""
-    if provider_mode() == "local":
-        return _fastembed_class() is not None
-    return bool(os.getenv(HF_TOKEN_ENV, "").strip())
+    """Compatibility alias for embedding configuration."""
+    return embedding_configured()
 
 
 def provider_status() -> dict[str, Any]:
     """Return safe provider state without exposing credentials or exceptions."""
     return {
-        "provider": provider_mode(),
-        "configured": provider_configured(),
+        # Keep the old fields for clients released before the split modes.
+        "provider": embedding_mode(),
+        "configured": embedding_configured(),
+        "embedding_mode": embedding_mode(),
+        "embedding_configured": embedding_configured(),
+        "chat_mode": chat_mode(),
+        "chat_configured": chat_configured(),
         "embedding_model": embedding_model(),
         "chat_model": chat_model(),
         "hosted_chat": hosted_chat_available(),
@@ -97,8 +143,9 @@ def status() -> dict[str, Any]:
     return provider_status()
 
 
-def _client(provider: Any = None):
-    if not provider_configured():
+def _client(provider: Any = None, *, purpose: str = "embedding"):
+    configured = embedding_configured() if purpose == "embedding" else chat_configured()
+    if not configured:
         raise RuntimeError("Hugging Face provider is not configured")
     global InferenceClient
     if InferenceClient is None:
@@ -165,7 +212,7 @@ def _local_embed_text(text: str) -> list[float]:
 
 def embed_text(text: str) -> list[float]:
     """Generate and L2-normalize one local or hosted embedding."""
-    if provider_mode() == "local":
+    if embedding_mode() == "local":
         return _local_embed_text(text)
     response = _client(embedding_provider()).feature_extraction(
         text or "", model=embedding_model()
@@ -178,7 +225,7 @@ def embed_text(text: str) -> list[float]:
 
 def embedding_cache_key() -> str:
     """Identify both provider and model so cached vectors cannot cross modes."""
-    if provider_mode() == "local":
+    if embedding_mode() == "local":
         return f"local:{embedding_model()}"
     return f"huggingface:{embedding_provider()}:{embedding_model()}"
 
@@ -275,40 +322,50 @@ def _message_content(response: Any) -> str:
 
 
 def grounded_answer(query: str, jobs: list[dict[str, Any]]) -> str:
-    """Answer using only safe, retrieved job fields and exact application URLs."""
-    if provider_mode() == "local":
-        context = _safe_context(jobs)
-        if not context:
-            return "Local grounded summary (not LLM-generated): No retrieved jobs were available."
-        lines = [
-            "Local grounded summary (not LLM-generated):",
-            f"Retrieved {len(context)} job(s) for this search.",
-        ]
-        for index, job in enumerate(context, start=1):
-            details = []
-            if job.get("title"):
-                details.append(f"Title: {job['title']}")
-            if job.get("company"):
-                details.append(f"Company: {job['company']}")
-            if job.get("location"):
-                details.append(f"Location: {job['location']}")
-            skills = job.get("skills") or []
-            if isinstance(skills, list) and skills:
-                details.append("Skills: " + ", ".join(str(skill) for skill in skills))
-            lines.append(f"{index}. " + " | ".join(details))
-            if job.get("url"):
-                lines.append(f"   Apply: {job['url']}")
-        return "\n".join(lines)
+    """Use hosted chat when enabled, falling back to a local grounded summary."""
+    if chat_mode() == "local":
+        return local_grounded_summary(jobs)
 
     context = json.dumps(_safe_context(jobs), ensure_ascii=False, sort_keys=True)
-    response = _client(chat_provider()).chat.completions.create(
-        model=chat_model(),
-        messages=[
-            {"role": "system", "content": GROUNDING_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Question: {query}\nJob context JSON:\n{context}"},
-        ],
-        temperature=0.1,
-        max_tokens=500,
-    )
-    answer = _message_content(response).strip()
-    return answer or "The available job context is insufficient to answer that question."
+    try:
+        response = _client(chat_provider(), purpose="chat").chat.completions.create(
+            model=chat_model(),
+            messages=[
+                {"role": "system", "content": GROUNDING_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Question: {query}\nJob context JSON:\n{context}"},
+            ],
+            temperature=0.1,
+            max_tokens=500,
+        )
+        answer = _message_content(response).strip()
+        return answer or "The available job context is insufficient to answer that question."
+    except Exception:
+        # Hosted chat is an enhancement; semantic retrieval and its grounded
+        # answer remain available when a provider rejects or cannot serve a call.
+        return local_grounded_summary(jobs)
+
+
+def local_grounded_summary(jobs: list[dict[str, Any]]) -> str:
+    """Build the deterministic, public-field-only copilot answer."""
+    context = _safe_context(jobs)
+    if not context:
+        return "Local grounded summary (not LLM-generated): No retrieved jobs were available."
+    lines = [
+        "Local grounded summary (not LLM-generated):",
+        f"Retrieved {len(context)} job(s) for this search.",
+    ]
+    for index, job in enumerate(context, start=1):
+        details = []
+        if job.get("title"):
+            details.append(f"Title: {job['title']}")
+        if job.get("company"):
+            details.append(f"Company: {job['company']}")
+        if job.get("location"):
+            details.append(f"Location: {job['location']}")
+        skills = job.get("skills") or []
+        if isinstance(skills, list) and skills:
+            details.append("Skills: " + ", ".join(str(skill) for skill in skills))
+        lines.append(f"{index}. " + " | ".join(details))
+        if job.get("url"):
+            lines.append(f"   Apply: {job['url']}")
+    return "\n".join(lines)
