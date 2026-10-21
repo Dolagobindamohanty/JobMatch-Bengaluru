@@ -32,6 +32,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_active_idx ON jobs(active);
 CREATE INDEX IF NOT EXISTS jobs_ai_idx ON jobs(active, is_ai);
 
+CREATE TABLE IF NOT EXISTS ai_job_embeddings (
+  source TEXT NOT NULL,
+  company TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  model TEXT NOT NULL,
+  embedding TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, company, job_id, content_hash, model)
+);
+
 CREATE TABLE IF NOT EXISTS pipeline_runs (
   id BIGSERIAL PRIMARY KEY,
   source TEXT NOT NULL,

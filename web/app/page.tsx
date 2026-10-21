@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useReducer, useState } from "react";
-import { fetchJobsPage, type Job, type JobsPage } from "../lib/api";
+import { askAiCopilot, fetchAiStatus, fetchJobsPage, type AiSearchResult, type AiStatus, type Job, type JobsPage } from "../lib/api";
 import { filterReducer, initialFilters } from "../lib/job-filters";
 
 function formatDate(value: string) {
@@ -29,6 +29,98 @@ function JobCard({ job, selected, onSelect, activeSkill, onSkill }: { job: Job; 
       </div>
       <a className="apply-link" href={job.url} target="_blank" rel="noreferrer">Apply <span aria-hidden="true">↗</span></a>
     </article>
+  );
+}
+
+function AiJobCopilot() {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<AiStatus | null>(null);
+  const [statusError, setStatusError] = useState(false);
+  const [answer, setAnswer] = useState("");
+  const [jobs, setJobs] = useState<AiSearchResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [asked, setAsked] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchAiStatus(controller.signal)
+      .then((value) => {
+        if (!controller.signal.aborted) setStatus(value);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setStatusError(true);
+      });
+    return () => controller.abort();
+  }, []);
+
+  async function handleAsk(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) {
+      setAsked(true);
+      setError("Enter a question before asking the AI copilot.");
+      setAnswer("");
+      setJobs([]);
+      return;
+    }
+    setLoading(true);
+    setAsked(true);
+    setError("");
+    setAnswer("");
+    setJobs([]);
+    try {
+      const response = await askAiCopilot(trimmedQuery, 5);
+      setAnswer(response.answer);
+      setJobs(response.jobs);
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : "The AI copilot is unavailable right now.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const providerNote = statusError
+    ? "AI availability could not be checked; Ask AI may be unavailable."
+    : status === null
+      ? "Checking the configured AI provider…"
+      : status.configured
+        ? "Uses the configured AI provider; availability can vary."
+        : "No AI provider is configured, so Ask AI may be unavailable.";
+
+  return (
+    <section className="copilot" aria-labelledby="copilot-heading">
+      <div className="copilot-heading">
+        <div>
+          <p className="eyebrow">SEMANTIC SEARCH · AI ASSISTANCE</p>
+          <h2 id="copilot-heading">Ask the job copilot.</h2>
+          <p className="copilot-copy">Describe what you are looking for in your own words. The answer is grounded in matching job postings.</p>
+        </div>
+        <span className={`copilot-status ${status?.configured ? "ready" : ""}`} role="status">{providerNote}</span>
+      </div>
+      <form className="copilot-form" onSubmit={handleAsk}>
+        <label htmlFor="copilot-query">What kind of role are you looking for?</label>
+        <div className="copilot-input-row">
+          <input id="copilot-query" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. Python roles building data platforms" aria-describedby="copilot-provider-note" />
+          <button type="submit" disabled={loading}>{loading ? "Thinking…" : "Ask AI"}</button>
+        </div>
+        <p id="copilot-provider-note" className="copilot-provider-note">{providerNote}</p>
+      </form>
+      {loading && <div className="copilot-state" role="status" aria-live="polite"><div className="spinner" aria-hidden="true" /><p>Searching roles and preparing a grounded answer…</p></div>}
+      {!loading && error && <div className="copilot-state copilot-error" role="alert"><strong>We couldn’t answer that right now.</strong><p>{error}</p></div>}
+      {!loading && !error && asked && <div className="copilot-results" aria-live="polite">
+        {answer && <div className="copilot-answer"><h3>Grounded answer</h3><p>{answer}</p></div>}
+        {jobs.length ? <div className="copilot-citations"><h3>Job citations</h3><ol aria-label="Jobs cited by the AI copilot">{jobs.map((job, index) => (
+          <li key={`${job.id}-${index}`}>
+            <article className="citation-card">
+              <div className="citation-number" aria-hidden="true">{index + 1}</div>
+              <div className="citation-content"><div className="card-topline"><span className="company">{job.company}</span>{job.matchedSkills.length > 0 && <span className="citation-match">{job.matchedSkills.join(", ")}</span>}</div><h4>{job.title}</h4><p className="meta">{job.location}</p></div>
+              {job.url !== "#" && <a className="citation-link" href={job.url} target="_blank" rel="noreferrer" aria-label={`Open application for ${job.title} at ${job.company}`}>Apply <span aria-hidden="true">↗</span></a>}
+            </article>
+          </li>
+        ))}</ol></div> : <p className="copilot-empty">No matching job citations were found for that question. Try describing a different skill, role, or location.</p>}
+      </div>}
+    </section>
   );
 }
 
@@ -82,6 +174,7 @@ export default function Home() {
       {filters.skill ? <button type="button" className="skill-filter" onClick={() => selectSkill("")} aria-label={`Clear skill filter: ${filters.skill}`}>Skill: {filters.skill} <span aria-hidden="true">×</span></button> : <span className="muted">Select a skill on a job to filter the entire feed.</span>}
       {hasFilters && <button type="button" className="clear-filters" onClick={() => dispatch({ type: "clear" })}>Clear all filters</button>}
     </div>
+    <AiJobCopilot />
     <div id="job-results" aria-busy={loading}>
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{loading ? "Loading matching jobs…" : error ? "Jobs could not be loaded." : `${result.total} matching ${result.total === 1 ? "role" : "roles"}. ${result.total ? `Page ${filters.page} of ${result.totalPages}.` : "Try changing your filters."}`}</p>
       {loading ? <div className="state"><div className="spinner" aria-hidden="true" /><p>Loading matching roles…</p></div> : error ? (

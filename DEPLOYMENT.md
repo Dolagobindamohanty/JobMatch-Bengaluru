@@ -51,6 +51,20 @@ Health check: /health
    public launch. Render sets `JOBMATCH_RESUME_ENABLED=false`; job browsing,
    health, and scheduled collection remain available.
 
+9. Configure the optional AI job-intelligence layer on the Render API service:
+
+```text
+HF_TOKEN=<Hugging Face token with Inference Providers permission>
+HF_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+HF_CHAT_MODEL=Qwen/Qwen2.5-7B-Instruct
+```
+
+Keep `HF_TOKEN` private in Render Environment; never put it in GitHub, the
+frontend, a URL, or a committed file. Without it, normal job search remains
+available while `/ai/search` and `/ai/copilot` return a clear provider-unavailable
+response. With it, the frontend exposes semantic search and a grounded AI job
+copilot. The API stores only cached job embeddings, not the token or resumes.
+
    When resume features are ready to be enabled, configure private S3-compatible
    object storage. Cloudflare R2 is recommended because it supports private
    buckets and the S3 API without tying uploads to the Render filesystem. Set

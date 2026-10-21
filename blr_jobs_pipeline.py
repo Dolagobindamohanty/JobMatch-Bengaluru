@@ -213,6 +213,11 @@ def init_db(conn):
         source TEXT, company TEXT, board_config TEXT, careers_url TEXT,
         active INTEGER DEFAULT 1, last_fetched_at TEXT,
         PRIMARY KEY (source, company))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS ai_job_embeddings (
+        source TEXT NOT NULL, company TEXT NOT NULL, job_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL, model TEXT NOT NULL, embedding TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY (source, company, job_id, content_hash, model))""")
     conn.commit()
 
 

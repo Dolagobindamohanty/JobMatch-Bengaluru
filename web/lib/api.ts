@@ -97,6 +97,23 @@ export type JobFilters = {
 
 export type JobsPage = { jobs: Job[]; total: number; totalPages: number };
 
+export type AiStatus = {
+  configured: boolean;
+  embeddingModel: string;
+  chatModel: string;
+};
+
+export type AiSearchResult = Job & {
+  similarityScore?: number;
+  matchedSkills: string[];
+};
+
+export type AiCopilotResponse = {
+  answer: string;
+  jobs: AiSearchResult[];
+  model: string;
+};
+
 async function requestJobs(params: URLSearchParams, signal?: AbortSignal): Promise<unknown> {
   let response: Response;
   try {
@@ -146,4 +163,79 @@ export async function fetchJobsPage(filters: JobFilters = {}, signal?: AbortSign
     throw new Error("The jobs API returned invalid pagination details. Try again or contact the API owner.");
   }
   return { jobs, total: metadata.total as number, totalPages: metadata.total_pages as number };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+async function requestAi(path: string, init: RequestInit, resource: string): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(getApiUrl(path), { ...init, cache: "no-store" });
+  } catch (reason) {
+    if (reason instanceof Error && reason.name === "AbortError") throw reason;
+    throw new Error("The AI service could not be reached. Check the API URL and provider configuration, then try again.");
+  }
+  await assertOk(response, resource);
+  return response.json();
+}
+
+export async function fetchAiStatus(signal?: AbortSignal): Promise<AiStatus> {
+  const payload = await requestAi("/ai/status", {
+    method: "GET",
+    signal,
+    headers: { Accept: "application/json" },
+  }, "AI status");
+  if (!isRecord(payload) || typeof payload.configured !== "boolean") {
+    throw new Error("The AI status response was invalid. Try again or contact the API owner.");
+  }
+  return {
+    configured: payload.configured,
+    embeddingModel: typeof payload.embedding_model === "string" ? payload.embedding_model : "",
+    chatModel: typeof payload.chat_model === "string" ? payload.chat_model : "",
+  };
+}
+
+function readAiJobs(payload: unknown): AiSearchResult[] {
+  if (!Array.isArray(payload)) {
+    throw new Error("The AI service returned an unexpected job list. Try again or contact the API owner.");
+  }
+  return payload.map((item, index) => {
+    const record = isRecord(item) ? item : {};
+    return {
+      ...normalizeJob(record as ApiJob, index),
+      similarityScore: typeof record.similarity_score === "number" ? record.similarity_score : undefined,
+      matchedSkills: Array.isArray(record.matched_skills) ? record.matched_skills.map(String) : [],
+    };
+  });
+}
+
+export async function fetchAiSearch(query: string, limit = 10, signal?: AbortSignal): Promise<AiSearchResult[]> {
+  const trimmedQuery = query.trim();
+  const params = new URLSearchParams({ q: trimmedQuery, limit: String(limit) });
+  const payload = await requestAi(`/ai/search?${params.toString()}`, {
+    method: "GET",
+    signal,
+    headers: { Accept: "application/json" },
+  }, "AI search");
+  if (!isRecord(payload)) {
+    throw new Error("The AI search response was invalid. Try again or contact the API owner.");
+  }
+  return readAiJobs(payload.jobs);
+}
+
+export async function askAiCopilot(query: string, limit = 5, signal?: AbortSignal): Promise<AiCopilotResponse> {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) throw new Error("Enter a question for the AI copilot.");
+  const payload = await requestAi("/ai/copilot", {
+    method: "POST",
+    signal,
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ query: trimmedQuery, limit }),
+  }, "AI copilot");
+  if (!isRecord(payload) || typeof payload.answer !== "string" || typeof payload.model !== "string") {
+    throw new Error("The AI copilot response was invalid. Try again or contact the API owner.");
+  }
+  return { answer: payload.answer, jobs: readAiJobs(payload.jobs), model: payload.model };
 }

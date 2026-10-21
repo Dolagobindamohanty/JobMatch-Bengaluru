@@ -19,6 +19,7 @@ from jobmatch_bengaluru.resume_parser import extract_text, parse_profile
 from jobmatch_bengaluru.matching import score_match
 from jobmatch_bengaluru.classifiers import extract_skills
 from jobmatch_bengaluru.postgres import PostgresConnection, initialize_postgres
+from jobmatch_bengaluru import ai as ai_service
 from api.app.storage import StorageError, get_resume_storage
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -146,7 +147,8 @@ def root():
         "version": app.version,
         "status": "ok",
         "docs": "/docs",
-        "endpoints": ["/health", "/jobs", "/jobs/ai", "/skills/trending", "/refresh", "/refresh/status"],
+        "endpoints": ["/health", "/jobs", "/jobs/ai", "/ai/status", "/ai/search",
+                      "/ai/copilot", "/skills/trending", "/refresh", "/refresh/status"],
     }
 
 
@@ -157,6 +159,7 @@ def connect():
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     init_account_tables(connection)
+    init_ai_embeddings_table(connection)
     return connection
 
 
@@ -192,6 +195,11 @@ class ResumeVersionInput(BaseModel):
     label: str = Field(min_length=1, max_length=120)
     resume_id: str | None = None
     notes: str | None = Field(default=None, max_length=2000)
+
+
+class CopilotInput(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=5, ge=1, le=20)
 
 
 def current_user_id(request: Request) -> str:
@@ -245,6 +253,16 @@ def init_account_tables(connection):
         label TEXT NOT NULL, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
     for table in ("saved_jobs", "saved_searches", "applications", "resume_versions"):
         connection.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_user ON {table}(user_id)")
+    connection.commit()
+
+
+def init_ai_embeddings_table(connection):
+    """Idempotent cache migration for semantic job embeddings."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS ai_job_embeddings (
+        source TEXT NOT NULL, company TEXT NOT NULL, job_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL, model TEXT NOT NULL, embedding TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY (source, company, job_id, content_hash, model))""")
     connection.commit()
 
 
@@ -481,6 +499,119 @@ def list_jobs(
         return {"jobs": [serialize(row) for row in rows], "page": page,
                 "page_size": page_size, "total": total,
                 "total_pages": (total + page_size - 1) // page_size}
+
+
+def _ai_public_job(job: dict[str, Any]) -> dict[str, Any]:
+    """Keep AI responses limited to public posting metadata."""
+    return {
+        "source": job.get("source"),
+        "company": job.get("company"),
+        "job_id": job.get("job_id"),
+        "title": job.get("title"),
+        "location": job.get("location"),
+        "url": job.get("url"),
+        "skills": job.get("skills") or [],
+        "similarity_score": job.get("similarity_score"),
+        "matched_skills": job.get("matched_skills") or [],
+    }
+
+
+def _parse_cached_embedding(value: Any) -> list[float] | None:
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+        return [float(item) for item in parsed]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _rank_ai_jobs(query: str, limit: int) -> list[dict[str, Any]]:
+    """Load active jobs, fill the embedding cache, and rank without resumes."""
+    with connect() as connection:
+        if not table_exists(connection):
+            return []
+        rows = connection.execute(
+            """SELECT source, company, job_id, title, location, url, description,
+                      skills, content_hash
+               FROM jobs WHERE active=1"""
+        ).fetchall()
+        jobs = []
+        missing = []
+        model = ai_service.embedding_model()
+        for row in rows:
+            job = row_to_dict(row)
+            job["skills"] = parse_skills(job.get("skills"))
+            job["content_hash"] = ai_service.job_content_hash(job)
+            cached = connection.execute(
+                """SELECT embedding FROM ai_job_embeddings
+                   WHERE source=? AND company=? AND job_id=? AND content_hash=? AND model=?""",
+                (job["source"], job["company"], job["job_id"], job["content_hash"], model),
+            ).fetchone()
+            vector = _parse_cached_embedding(cached[0]) if cached else None
+            if vector:
+                job["_embedding"] = vector
+            else:
+                missing.append(job)
+            jobs.append(job)
+
+        if not jobs:
+            return []
+        now = datetime.now(timezone.utc).isoformat()
+        for job in missing:
+            vector = ai_service.embed_text(ai_service.job_embedding_text(job))
+            job["_embedding"] = vector
+            connection.execute(
+                """INSERT INTO ai_job_embeddings
+                   (source, company, job_id, content_hash, model, embedding, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(source, company, job_id, content_hash, model) DO UPDATE SET
+                     embedding=excluded.embedding, updated_at=excluded.updated_at""",
+                (job["source"], job["company"], job["job_id"], job["content_hash"],
+                 model, json.dumps(vector, separators=(",", ":")), now, now),
+            )
+        if missing:
+            connection.commit()
+
+    ranked = ai_service.semantic_rank(query, jobs)
+    return [_ai_public_job(job) for job in ranked[:limit]]
+
+
+@app.get("/ai/status")
+def ai_status():
+    return {
+        "configured": ai_service.provider_configured(),
+        "embedding_model": ai_service.embedding_model(),
+        "chat_model": ai_service.chat_model(),
+    }
+
+
+@app.get("/ai/search")
+def ai_search(
+    q: str = Query(..., min_length=1, max_length=2000),
+    limit: Annotated[int, Query(ge=1, le=100)] = 10,
+):
+    if not ai_service.provider_configured():
+        raise HTTPException(status_code=503, detail="AI provider unavailable")
+    if not q.strip():
+        raise HTTPException(status_code=422, detail="Query must not be empty")
+    try:
+        jobs = _rank_ai_jobs(q, limit)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="AI provider unavailable") from error
+    return {"query": q, "jobs": jobs, "model": ai_service.embedding_model()}
+
+
+@app.post("/ai/copilot")
+def ai_copilot(payload: CopilotInput):
+    if not ai_service.provider_configured():
+        raise HTTPException(status_code=503, detail="AI provider unavailable")
+    if not payload.query.strip():
+        raise HTTPException(status_code=422, detail="Query must not be empty")
+    try:
+        jobs = _rank_ai_jobs(payload.query, payload.limit)
+        answer = ai_service.grounded_answer(payload.query, jobs)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="AI provider unavailable") from error
+    return {"answer": answer, "jobs": jobs, "model": ai_service.chat_model()}
 
 
 @app.get("/jobs/ai")

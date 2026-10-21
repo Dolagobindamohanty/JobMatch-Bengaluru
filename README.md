@@ -1,8 +1,11 @@
 # JobMatch Bengaluru
 
-JobMatch Bengaluru is a Bengaluru-focused IT and AI jobs product. It collects
-public employer-board postings, classifies AI/ML roles, extracts skills, parses
-resumes, ranks resume-to-job matches, and explains skill gaps.
+JobMatch Bengaluru is a Bengaluru-focused AI job-market intelligence product. It
+collects public employer-board postings, classifies IT and AI/ML roles, extracts
+skills, supports exact skill discovery, and optionally uses Hugging Face hosted
+embeddings for semantic job search and a grounded AI job copilot. Resume parsing
+and resume-to-job matching exist behind feature flags but remain disabled in the
+current public launch.
 
 ## Local development
 
@@ -28,6 +31,22 @@ API at `http://localhost:8000`.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md). The intended public setup is Vercel for the
 Next.js frontend and Render (or another Python host) for the FastAPI backend.
+
+## AI layer
+
+When `HF_TOKEN` is configured on the API, the following endpoints are available:
+
+```text
+GET  /ai/status
+GET  /ai/search?q=Python%20data%20platform
+POST /ai/copilot
+```
+
+The semantic layer embeds the query and active jobs, caches job embeddings in the
+database, ranks jobs by cosine similarity, and sends only the retrieved public
+job context to the chat model. The copilot is grounded to those postings and
+must include the source application URLs rather than inventing requirements,
+salary, or company facts. Normal keyword/skill search works without an AI token.
 
 ## Data sources
 
