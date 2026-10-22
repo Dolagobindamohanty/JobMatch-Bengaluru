@@ -37,6 +37,70 @@ def test_job_api_lists_and_filters(tmp_path, monkeypatch):
     assert response.json()["jobs"][0]["skills"] == ["python", "pytorch"]
 
 
+def test_job_api_labels_recent_and_stale_listings_without_hiding_them(tmp_path, monkeypatch):
+    db = tmp_path / "freshness_jobs.db"
+    now = datetime.now(timezone.utc)
+    connection = sqlite3.connect(db)
+    pipeline.init_db(connection)
+    jobs = [
+        {
+            "job_id": "recent", "title": "Recent Engineer", "location": "Bengaluru",
+            "url": "https://jobs/recent", "posted": (now - timedelta(days=5)).isoformat(),
+            "description": "Recent role", "skills": [],
+        },
+        {
+            "job_id": "stale", "title": "Stale Engineer", "location": "Bengaluru",
+            "url": "https://jobs/stale", "posted": (now - timedelta(days=45)).isoformat(),
+            "description": "Older role", "skills": [],
+        },
+    ]
+    pipeline.upsert(connection, "fixture", "Acme", jobs, now.isoformat())
+    connection.close()
+    monkeypatch.setattr(main, "DB_PATH", db)
+    monkeypatch.setenv(main.FRESHNESS_STALE_DAYS_ENV, "30")
+
+    response = TestClient(main.app).get("/jobs")
+    assert response.status_code == 200
+    listings = {job["job_id"]: job for job in response.json()["jobs"]}
+    assert set(listings) == {"recent", "stale"}
+    assert listings["recent"]["freshness_status"] == "recent"
+    assert listings["recent"]["age_days"] >= 5
+    assert listings["recent"]["last_verified"] == now.isoformat()
+    assert listings["stale"]["freshness_status"] == "stale"
+    assert listings["stale"]["age_days"] >= 45
+
+
+def test_job_detail_uses_last_seen_when_posted_date_is_unknown(tmp_path, monkeypatch):
+    db = tmp_path / "unknown_freshness_jobs.db"
+    now = datetime.now(timezone.utc)
+    connection = sqlite3.connect(db)
+    pipeline.init_db(connection)
+    pipeline.upsert(connection, "fixture", "Acme", [{
+        "job_id": "fallback", "title": "Fallback Engineer", "location": "Bengaluru",
+        "url": "https://jobs/fallback", "posted": "not-a-date", "description": "Role",
+        "skills": [],
+    }], now.isoformat())
+    connection.close()
+    monkeypatch.setattr(main, "DB_PATH", db)
+    monkeypatch.setenv(main.FRESHNESS_STALE_DAYS_ENV, "30")
+
+    response = TestClient(main.app).get("/jobs/fixture/Acme/fallback")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["freshness_status"] == "active"
+    assert body["age_days"] == 0
+    assert body["last_verified"] == now.isoformat()
+
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET posted=?, last_seen=? WHERE job_id=?",
+                           ("not-a-date", "also-not-a-date", "fallback"))
+        connection.commit()
+    unknown = TestClient(main.app).get("/jobs/fixture/Acme/fallback")
+    assert unknown.status_code == 200
+    assert unknown.json()["freshness_status"] == "unknown"
+    assert unknown.json()["age_days"] is None
+
+
 def test_api_root_is_a_friendly_health_entrypoint():
     response = TestClient(main.app).get("/")
     assert response.status_code == 200

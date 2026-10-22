@@ -55,9 +55,16 @@ Health check: /health
    `fastembed`, uses `BAAI/bge-small-en-v1.5` by default, and downloads that
    model only when the first semantic search or copilot request needs it. No
    Hugging Face token or hosted-model credits are required for local semantic
-   search. To select another local model, set `AI_LOCAL_EMBEDDING_MODEL`.
+    search. To select another local model, set `AI_LOCAL_EMBEDDING_MODEL`.
 
-    Hugging Face hosted chat is optional when hosted-model credits exist. To
+10. Job freshness is labeled in the API and frontend instead of being inferred
+    from the word "active" alone. `JOBMATCH_STALE_DAYS` controls the age at
+    which a listing is shown as stale; it defaults to 30 days. A listing can
+    remain active while visibly marked stale because the source feed still
+    reports it. Each response also includes the last successful verification
+    timestamp when available.
+
+     Hugging Face hosted chat is optional when hosted-model credits exist. To
     enable hosted chat while keeping semantic embeddings local, set:
 
 ```text

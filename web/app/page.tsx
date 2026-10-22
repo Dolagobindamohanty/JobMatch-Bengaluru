@@ -5,9 +5,34 @@ import { askAiCopilot, fetchAiStatus, fetchJobsPage, type AiSearchResult, type A
 import { filterReducer, initialFilters } from "../lib/job-filters";
 
 function formatDate(value: string) {
-  if (!value) return "Recently posted";
+  if (!value) return "Posting date unavailable";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(date);
+}
+
+function formatVerificationDate(value?: string | null) {
+  if (!value) return "Verification unavailable";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(date);
+}
+
+function freshnessStatusLabel(status: Job["freshness_status"]) {
+  return status === "active" ? "Fresh" : status === "recent" ? "Recent" : status === "stale" ? "Stale" : "Unknown";
+}
+
+function freshnessAgeLabel(ageDays?: number | null) {
+  if (ageDays === null || ageDays === undefined) return "age unavailable";
+  return `${ageDays}d old`;
+}
+
+function FreshnessMeta({ job }: { job: Job }) {
+  const status = job.freshness_status ?? "unknown";
+  return (
+    <div className="freshness-meta" aria-label={`Freshness: ${freshnessStatusLabel(status)}, ${freshnessAgeLabel(job.age_days)}. Last verified ${formatVerificationDate(job.last_verified)}.`}>
+      <span className={`freshness-badge freshness-${status}`}>{freshnessStatusLabel(status)} · {freshnessAgeLabel(job.age_days)}</span>
+      <span className="verified-date">Verified {formatVerificationDate(job.last_verified)}</span>
+    </div>
+  );
 }
 
 function SkillTags({ skills, activeSkill, onSkill }: { skills: string[]; activeSkill: string; onSkill: (skill: string) => void }) {
@@ -24,6 +49,7 @@ function JobCard({ job, selected, onSelect, activeSkill, onSkill }: { job: Job; 
           <div className="card-topline"><span className="company">{job.company}</span>{job.is_ai && <span className="ai-badge">AI / ML</span>}</div>
           <h2>{job.title}</h2>
           <p className="meta">{job.location} <span>·</span> {formatDate(job.posted)}</p>
+          <FreshnessMeta job={job} />
         </button>
         <SkillTags skills={job.skills.slice(0, 4)} activeSkill={activeSkill} onSkill={onSkill} />
       </div>
@@ -168,6 +194,11 @@ export default function Home() {
       <div><p className="eyebrow">JOBS · SKILLS · BENGALURU</p><h1>Find your next<br /><em>technical role.</em></h1><p className="hero-copy">Explore active IT and AI opportunities in Bengaluru. Choose a skill on any role to discover more jobs that use it.</p></div>
       <div className="hero-stat"><strong>{loading || error ? "—" : result.total.toLocaleString("en-IN")}</strong><span>matching roles</span></div>
     </header>
+    <section className="trust-context" aria-label="Feed scope and verification context">
+      <div><p className="eyebrow">FEED SCOPE</p><strong>Bengaluru-only</strong><p>Roles with Bengaluru, Bangalore, or BLR in their structured location.</p></div>
+      <div><p className="eyebrow">ACTIVE FEED</p><strong>Current source listings</strong><p>Active means the role was retained by the latest successful refresh for its source.</p></div>
+      <div><p className="eyebrow">DATASET &amp; VERIFICATION</p><strong>Public employer boards</strong><p>Each role keeps its application URL and shows its own freshness and last-verified date.</p></div>
+    </section>
     <section className="toolbar" aria-label="Job filters">
       <label className="search"><span aria-hidden="true">⌕</span><input value={filters.query} onChange={(event) => dispatch({ type: "query", value: event.target.value })} placeholder="Search title, company, or skill" aria-label="Search jobs" /></label>
       <label className={`toggle ${filters.aiOnly ? "on" : ""}`}><input type="checkbox" checked={filters.aiOnly} onChange={(event) => dispatch({ type: "aiOnly", value: event.target.checked })} /><span className="toggle-track" /> AI / ML only</label>
@@ -182,13 +213,13 @@ export default function Home() {
       {loading ? <div className="state"><div className="spinner" aria-hidden="true" /><p>Loading matching roles…</p></div> : error ? (
         <div className="state state-error" role="alert"><strong>We couldn’t load the job feed.</strong><p>{error}</p><button type="button" onClick={retry}>Try again</button></div>
       ) : <section className="browser" aria-label="Matching jobs">
-        <div className="results-head"><div><span className="eyebrow">OPEN POSITIONS</span><h2>{result.total.toLocaleString("en-IN")} {result.total === 1 ? "role" : "roles"} found</h2></div><span className="result-note">{filters.aiOnly ? "AI / ML roles" : "All technology roles"}</span></div>
+        <div className="results-head"><div><span className="eyebrow">OPEN POSITIONS</span><h2>{result.total.toLocaleString("en-IN")} {result.total === 1 ? "role" : "roles"} found</h2></div><div className="results-context"><span className="result-note">{filters.aiOnly ? "AI / ML roles" : "All technology roles"}</span><span>Bengaluru-only · active feed · freshness shown per role</span></div></div>
         {result.jobs.length === 0 ? <div className="empty"><span className="empty-icon" aria-hidden="true">⌁</span><h3>No roles match those filters.</h3><p>Try another skill, a broader search, or turn off AI / ML only.</p>{hasFilters && <button type="button" className="clear-filters" onClick={() => dispatch({ type: "clear" })}>Clear all filters</button>}</div> : <>
           <div className="browser-grid">
             <div className="job-list">{result.jobs.map((job) => <JobCard key={job.id} job={job} selected={selectedJob?.id === job.id} onSelect={() => setSelectedId(job.id)} activeSkill={filters.skill} onSkill={selectSkill} />)}</div>
             {selectedJob && <aside className="detail" aria-label="Selected role details">
               <div className="detail-label">ROLE DETAILS</div><div className="detail-heading"><span className="company">{selectedJob.company}</span>{selectedJob.is_ai && <span className="ai-badge">AI / ML</span>}</div>
-              <h2>{selectedJob.title}</h2><p className="meta">{selectedJob.location} <span>·</span> {formatDate(selectedJob.posted)}</p>
+              <h2>{selectedJob.title}</h2><p className="meta">{selectedJob.location} <span>·</span> {formatDate(selectedJob.posted)}</p><FreshnessMeta job={selectedJob} />
               <a className="primary-apply" href={selectedJob.url} target="_blank" rel="noreferrer">View application <span aria-hidden="true">↗</span></a>
               <div className="detail-section"><h3>Skills</h3>{selectedJob.skills.length ? <SkillTags skills={selectedJob.skills} activeSkill={filters.skill} onSkill={selectSkill} /> : <p className="muted">Skills not listed</p>}</div>
               <div className="detail-section"><h3>About the role</h3><p className="description">{selectedJob.description || "The employer has not provided a description for this role."}</p></div>

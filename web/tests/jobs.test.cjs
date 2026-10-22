@@ -17,7 +17,7 @@ test("combines exact skill, text, AI and page filters and uses server totals", a
     });
     assert.equal(options.signal, controller.signal);
     assert.equal(options.cache, "no-store");
-    return Response.json({ jobs: [{ job_id: "other-page", title: "Engineer", is_ai: 1, skills: '["C++ / .NET"]' }], total: 41, total_pages: 3 });
+    return Response.json({ jobs: [{ job_id: "other-page", title: "Engineer", is_ai: 1, skills: '["C++ / .NET"]', last_verified: "2026-05-01T10:30:00+00:00", age_days: 5, freshness_status: "recent" }], total: 41, total_pages: 3 });
   };
   const page = await fetchJobsPage({ skill: "C++ / .NET", q: " platform engineer ", aiOnly: true, page: 3, pageSize: 20 }, controller.signal);
   assert.equal(page.total, 41);
@@ -26,6 +26,9 @@ test("combines exact skill, text, AI and page filters and uses server totals", a
   assert.equal(page.jobs[0].id, "other-page");
   assert.equal(page.jobs[0].is_ai, true);
   assert.deepEqual(page.jobs[0].skills, ["C++ / .NET"]);
+  assert.equal(page.jobs[0].last_verified, "2026-05-01T10:30:00+00:00");
+  assert.equal(page.jobs[0].age_days, 5);
+  assert.equal(page.jobs[0].freshness_status, "recent");
 });
 
 test("cleared filters are omitted and an empty server page is valid", async () => {

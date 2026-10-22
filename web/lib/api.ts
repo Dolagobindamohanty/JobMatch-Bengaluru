@@ -11,6 +11,9 @@ export type Job = {
   skills: string[];
   role_category?: string;
   experience_level?: string;
+  last_verified?: string | null;
+  age_days?: number | null;
+  freshness_status?: "active" | "recent" | "stale" | "unknown";
 };
 
 type ApiJob = Omit<Partial<Job>, "is_ai" | "skills"> & {
@@ -20,6 +23,9 @@ type ApiJob = Omit<Partial<Job>, "is_ai" | "skills"> & {
   active?: boolean | number;
   is_ai?: boolean | number | string;
   skills?: string[] | string;
+  last_verified?: string | null;
+  age_days?: number | null;
+  freshness_status?: string;
 };
 
 const configuredApiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
@@ -67,7 +73,7 @@ export async function requestRefresh(): Promise<void> {
 }
 
 function normalizeJob(item: ApiJob, index: number): Job {
-  return {
+  const normalized: Job = {
     id: String(item.id ?? item.job_id ?? `${item.company ?? "job"}-${index}`),
     source: item.source ?? "",
     company: item.company ?? "Unknown company",
@@ -85,6 +91,12 @@ function normalizeJob(item: ApiJob, index: number): Job {
     role_category: item.role_category,
     experience_level: item.experience_level,
   };
+  if (typeof item.last_verified === "string" || item.last_verified === null) normalized.last_verified = item.last_verified;
+  if (typeof item.age_days === "number" || item.age_days === null) normalized.age_days = item.age_days;
+  if (item.freshness_status === "active" || item.freshness_status === "recent" || item.freshness_status === "stale" || item.freshness_status === "unknown") {
+    normalized.freshness_status = item.freshness_status;
+  }
+  return normalized;
 }
 
 export type JobFilters = {

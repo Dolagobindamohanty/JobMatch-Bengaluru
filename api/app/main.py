@@ -2,6 +2,7 @@
 import hmac
 import json
 import logging
+import math
 import os
 import sqlite3
 import subprocess
@@ -31,6 +32,8 @@ REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", 24 * 60 * 6
 REFRESH_ON_STARTUP = os.getenv("REFRESH_ON_STARTUP", "false").lower() in {"1", "true", "yes"}
 REFRESH_EMPTY_ON_STARTUP = os.getenv("REFRESH_EMPTY_ON_STARTUP", "true").lower() in {"1", "true", "yes"}
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN") or None
+FRESHNESS_STALE_DAYS_ENV = "JOBMATCH_STALE_DAYS"
+DEFAULT_FRESHNESS_STALE_DAYS = 30
 RESUME_FEATURE_FLAG = "JOBMATCH_RESUME_ENABLED"
 FEATURE_DISABLED_DETAIL = "Resume and account functionality is temporarily disabled"
 _refresh_lock = threading.Lock()
@@ -296,11 +299,72 @@ def parse_skills(value: Any) -> list[str]:
         return []
 
 
+def freshness_stale_days() -> float:
+    """Return the configured age after which a listing is labeled stale.
+
+    Invalid, zero, or negative configuration falls back to a conservative
+    default rather than making the API hide or mislabel every active listing.
+    Reading the environment per request also keeps runtime configuration and
+    isolated API tests predictable.
+    """
+    raw_value = os.getenv(FRESHNESS_STALE_DAYS_ENV)
+    try:
+        value = float(raw_value) if raw_value is not None else DEFAULT_FRESHNESS_STALE_DAYS
+    except (TypeError, ValueError):
+        value = DEFAULT_FRESHNESS_STALE_DAYS
+    return value if value > 0 and math.isfinite(value) else DEFAULT_FRESHNESS_STALE_DAYS
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def freshness_metadata(posted: Any, last_seen: Any) -> dict[str, Any]:
+    """Build trust metadata without changing the stored job representation.
+
+    A parseable posted timestamp is the best age signal.  If it is absent or
+    malformed, the last successful observation is used instead.  Future dates
+    are clamped to age zero so bad clock skew cannot make a listing stale.
+    """
+    posted_at = _parse_timestamp(posted)
+    last_seen_at = _parse_timestamp(last_seen)
+    reference = posted_at or last_seen_at
+    last_verified = last_seen if last_seen_at else None
+    if reference is None:
+        return {
+            "last_verified": last_verified,
+            "age_days": None,
+            "freshness_status": "unknown",
+        }
+
+    age_days = max(0.0, (datetime.now(timezone.utc) - reference).total_seconds() / 86400)
+    age_days_value: int | float = int(age_days) if age_days.is_integer() else round(age_days, 2)
+    if age_days_value == 0:
+        status = "active"
+    elif age_days <= freshness_stale_days():
+        status = "recent"
+    else:
+        status = "stale"
+    return {
+        "last_verified": last_verified,
+        "age_days": age_days_value,
+        "freshness_status": status,
+    }
+
+
 def serialize(row):
     item = row_to_dict(row)
+    last_seen = item.pop("last_seen", None)
     item["skills"] = parse_skills(item.get("skills"))
     item["is_ai"] = bool(item.get("is_ai"))
     item["active"] = bool(item.get("active"))
+    item.update(freshness_metadata(item.get("posted_at"), last_seen))
     return item
 
 
@@ -478,7 +542,7 @@ def list_jobs(
         where = " AND ".join(clauses)
         order = {"newest": "posted DESC, last_seen DESC", "company": "company, title", "title": "title"}[sort]
         offset = (page - 1) * page_size
-        select = f"SELECT source, company, job_id, title, location, url AS apply_url, posted AS posted_at, description, active, is_ai, role_category, experience_level, skills FROM jobs WHERE {where} ORDER BY {order}"
+        select = f"SELECT source, company, job_id, title, location, url AS apply_url, posted AS posted_at, last_seen, description, active, is_ai, role_category, experience_level, skills FROM jobs WHERE {where} ORDER BY {order}"
         normalized_skill = (skill or "").strip().casefold()
         if normalized_skill:
             # Both stores keep skills as JSON text. Parse it identically rather
@@ -637,7 +701,7 @@ def ai_jobs(
 def get_job(source: str, company: str, job_id: str):
     with connect() as connection:
         row = connection.execute(
-            "SELECT source, company, job_id, title, location, url AS apply_url, posted AS posted_at, description, active, is_ai, role_category, experience_level, skills FROM jobs WHERE source=? AND company=? AND job_id=? AND active=1",
+            "SELECT source, company, job_id, title, location, url AS apply_url, posted AS posted_at, last_seen, description, active, is_ai, role_category, experience_level, skills FROM jobs WHERE source=? AND company=? AND job_id=? AND active=1",
             (source, company, job_id),
         ).fetchone()
     if not row:
